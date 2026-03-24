@@ -242,5 +242,29 @@ def export_walls_ifc(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@mcp.tool()
+def colorize_rooms_in_cad(dxf_path: str) -> str:
+    """
+    GstarCAD/AutoCAD'de açık olan çizime 3 renkli hatch uygular.
+    GstarCAD açık ve dxf_path ile aynı çizim aktif olmalıdır.
+
+      Yeşil  → İsim tanımlı alan  (MAHAL BLOCK eşleşti)
+      Mavi   → İsimsiz tanımlı alan (polygon var, isim yok)
+      Kırmızı→ Tanımsız alan (label var, polygon bulunamadı)
+
+    Args:
+        dxf_path: DXF dosyasının tam yolu
+    """
+    from tools.cad_colorizer import colorize_rooms
+
+    result = colorize_rooms(dxf_path)
+    result["summary"] = (
+        f"{result['green']} yeşil (isim tanımlı), "
+        f"{result['blue']} mavi (isimsiz tanımlı), "
+        f"{result['red']} kırmızı (tanımsız)"
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 if __name__ == "__main__":
     mcp.run()
