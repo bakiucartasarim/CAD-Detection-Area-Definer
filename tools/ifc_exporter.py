@@ -31,7 +31,8 @@ def export_walls_to_ifc(
 
     wall_layers = {n for n, t in layer_types.items() if t == "walls"}
 
-    rooms: list[list[list[float]]] = []
+    # ── Kapalı duvar polyline'larını topla ─────────────────────────────────
+    rooms: list[dict] = []
     for ent in data["entities"]:
         if ent["type"] != "LWPOLYLINE":
             continue
@@ -42,16 +43,70 @@ def export_walls_to_ifc(
         pts = ent.get("points", [])
         if len(pts) < 3:
             continue
-        rooms.append([[p[0] * linear_scale, p[1] * linear_scale] for p in pts])
+        pts_m = [[p[0] * linear_scale, p[1] * linear_scale] for p in pts]
+        cx = sum(p[0] for p in pts_m) / len(pts_m)
+        cy = sum(p[1] for p in pts_m) / len(pts_m)
+        rooms.append({"pts": pts_m, "cx": cx, "cy": cy,
+                      "name": "", "number": "", "area_attr": ""})
+
+    # ── MAHAL BLOCK INSERT'lerinden oda isimlerini oku ─────────────────────
+    labels = _collect_labels(data["entities"], linear_scale)
+
+    # Her odaya en yakın etiketi eşleştir
+    used: set[int] = set()
+    for room in rooms:
+        best_i, best_d = -1, float("inf")
+        for i, lbl in enumerate(labels):
+            if i in used:
+                continue
+            d = math.hypot(lbl["x"] - room["cx"], lbl["y"] - room["cy"])
+            if d < best_d:
+                best_d, best_i = d, i
+        if best_i >= 0 and best_d < 50.0:   # 50 m eşik (koordinatlar m cinsinden)
+            room["name"]      = labels[best_i]["name"]
+            room["number"]    = labels[best_i]["number"]
+            room["area_attr"] = labels[best_i]["area"]
+            used.add(best_i)
 
     ifc = _build_ifc(rooms, wall_height_m, wall_thickness_m)
     ifc.write(output_path)
 
+    named = sum(1 for r in rooms if r["name"])
     return {
         "spaces": len(rooms),
-        "walls": sum(len(r) for r in rooms),
+        "named_spaces": named,
+        "walls": sum(len(r["pts"]) for r in rooms),
         "output": output_path,
     }
+
+
+def _collect_labels(entities: list, linear_scale: float) -> list[dict]:
+    """MAHAL BLOCK INSERT'lerinden isim/numara/alan oku."""
+    labels = []
+    for ent in entities:
+        if ent["type"] != "INSERT":
+            continue
+        layer = ent.get("layer", "").lower()
+        if not any(kw in layer for kw in ("mahal", "room", "space")):
+            continue
+        attrs = ent.get("attrs", {})
+        if not attrs:
+            continue
+        name   = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or
+                  attrs.get("MAHAL_ADI") or "").strip()
+        number = (attrs.get("ROOMOBJECTS:NUMBER") or attrs.get("NUMBER") or "").strip()
+        area   = (attrs.get("ALAN:NAME") or attrs.get("ALAN") or
+                  attrs.get("AREA") or "").strip()
+        if not name and not number:
+            continue
+        labels.append({
+            "x":      ent.get("x", 0.0) * linear_scale,
+            "y":      ent.get("y", 0.0) * linear_scale,
+            "name":   name,
+            "number": number,
+            "area":   area,
+        })
+    return labels
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -135,8 +190,11 @@ def _build_ifc(rooms, wall_h, wall_t):
     spaces = []
     walls  = []
 
-    for idx, pts in enumerate(rooms):
-        area = _polygon_area(pts)
+    for idx, room in enumerate(rooms):
+        pts    = room["pts"]
+        r_name = room.get("name") or f"Oda {idx + 1}"
+        r_num  = room.get("number") or str(idx + 1)
+        area   = _polygon_area(pts)
 
         # IfcSpace
         poly_pts = [_cp2(ifc, p[0], p[1]) for p in pts]
@@ -148,10 +206,17 @@ def _build_ifc(rooms, wall_h, wall_t):
         shape = ifc.createIfcProductDefinitionShape(None, None, [
             ifc.createIfcShapeRepresentation(body, "Body", "SweptSolid", [solid])])
         space = ifc.createIfcSpace(
-            _uid(), owner, f"Oda {idx+1}", None, None,
+            _uid(), owner,
+            r_name,           # Name  = oda adı (MUAYENE ODASI vb.)
+            r_num,            # Description = oda numarası (Z_02 vb.)
+            None,
             _placement(ifc, storey.ObjectPlacement), shape, None, "ELEMENT", "INTERNAL")
-        _pset(ifc, owner, space, "Pset_SpaceCommon",
-              {"NetFloorArea": round(area, 3), "SpaceID": idx + 1})
+        _pset(ifc, owner, space, "Pset_SpaceCommon", {
+            "NetFloorArea": round(area, 3),
+            "SpaceID":      idx + 1,
+            "MahalAdi":     r_name,
+            "MahalNo":      r_num,
+        })
         spaces.append(space)
 
         # IfcWall per edge
