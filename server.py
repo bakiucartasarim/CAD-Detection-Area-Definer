@@ -8,6 +8,7 @@ Claude'a şu araçları açar:
   • get_unknown_layers→ Tanımlanamayan katmanları listeler
   • train_layer       → Yeni katman → tip eşleştirmesi öğretir
   • get_room_geometry → Tek bir odanın tam geometrisini döner
+  • export_walls_ifc  → Duvar polyline'larını IfcSpace+IfcWall olarak dışa aktarır
 """
 from __future__ import annotations
 import json
@@ -206,6 +207,38 @@ def train_layer(layer_name: str, element_type: str) -> str:
     from parsers.element_classifier import train_layer as _train
 
     result = _train(layer_name, element_type)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def export_walls_ifc(
+    dxf_path: str,
+    output_path: str = "",
+    wall_height_m: float = 3.0,
+    wall_thickness_m: float = 0.10,
+) -> str:
+    """
+    DXF'teki kapalı duvar polyline'larını IFC dosyasına dışa aktarır.
+    Her kapalı alan → IfcSpace (oda) + IfcWall (10cm kalınlık, 3m yükseklik).
+
+    Args:
+        dxf_path: DXF dosyasının tam yolu
+        output_path: Çıktı IFC dosyası yolu (boş bırakılırsa DXF ile aynı klasöre kaydeder)
+        wall_height_m: Duvar yüksekliği metre cinsinden (varsayılan: 3.0)
+        wall_thickness_m: Duvar kalınlığı metre cinsinden (varsayılan: 0.10)
+    """
+    from tools.ifc_exporter import export_walls_to_ifc
+
+    if not output_path:
+        base = os.path.splitext(dxf_path)[0]
+        output_path = base + "_walls.ifc"
+
+    result = export_walls_to_ifc(
+        dxf_path=dxf_path,
+        output_path=output_path,
+        wall_height_m=wall_height_m,
+        wall_thickness_m=wall_thickness_m,
+    )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
