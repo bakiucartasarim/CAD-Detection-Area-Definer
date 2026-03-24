@@ -1,0 +1,16 @@
+{
+  "_comment": "Örnek DXF dosyası katman etiketleri. Gerçek DXF dosyaları için buraya annotation ekleyin.",
+  "file": "Drawing15.dxf",
+  "source": "TSM (Toplum Sağlığı Merkezi) planı",
+  "layers": {
+    "0ASM-DUVAR": "walls",
+    "0ASM-SIVA": "walls",
+    "0ASM-KAPI": "doors",
+    "0ASM-PENCERE": "windows",
+    "0ASM-TEFRİS": "furniture",
+    "0ASM-MAHAL BİLGİ": "rooms",
+    "0ASM-KOLON": "columns",
+    "0ASM-MERDIVEN": "stairs",
+    "ELEKTRİK-HAT": "electrical"
+  }
+}

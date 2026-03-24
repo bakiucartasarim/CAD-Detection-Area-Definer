@@ -1,0 +1,40 @@
+{
+  "_comment": "Learned layer → element type mappings. Grows with each DXF analyzed.",
+  "_version": 1,
+  "walls": [
+    "duvar", "wall", "walls", "z-wall", "exterior", "mimari",
+    "0asm-duvar", "0asm-siva", "siva", "sivaa"
+  ],
+  "doors": [
+    "kapi", "kapı", "door", "doors", "kapilar", "kapılar",
+    "0asm-kapi", "0asm-kapı", "dkapi", "d-kapi"
+  ],
+  "windows": [
+    "pencere", "window", "windows", "cam", "camlar",
+    "0asm-pencere", "0asm-cam", "glazing", "pencereler"
+  ],
+  "furniture": [
+    "mobilya", "furniture", "tefris", "tefr", "esya", "esya",
+    "a_furn", "furn", "mutfak", "banyo", "wc",
+    "0asm-tefris", "0asm-mobilya", "islak"
+  ],
+  "columns": [
+    "kolon", "column", "columns", "kol", "perde", "tretuvar"
+  ],
+  "stairs": [
+    "merdiven", "stair", "stairs", "rampa"
+  ],
+  "rooms": [
+    "mahal", "room", "space", "0asm-mahal", "oda"
+  ],
+  "dimensions": [
+    "kot", "olcu", "ölçü", "dimension", "dim", "kota"
+  ],
+  "text": [
+    "text", "yazi", "yazı", "annotation", "metin", "not"
+  ],
+  "electrical": [
+    "elektrik", "elk", "kablo", "hat", "linye", "lınye",
+    "armatur", "anahtar", "priz", "cctv", "yangin"
+  ]
+}

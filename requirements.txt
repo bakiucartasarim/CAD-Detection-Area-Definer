@@ -1,0 +1,4 @@
+mcp>=1.0.0
+ezdxf>=1.1.0
+shapely>=2.0.0
+numpy>=1.24.0
