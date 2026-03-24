@@ -52,9 +52,17 @@ def export_walls_to_ifc(
     # ── MAHAL BLOCK INSERT'lerinden oda isimlerini oku ─────────────────────
     labels = _collect_labels(data["entities"], linear_scale)
 
+    # Büyük bina dış sınırı polyline'larını filtrele (>200 m²)
+    rooms = [r for r in rooms if _polygon_area(r["pts"]) <= 200.0]
+
     # Her odaya en yakın etiketi eşleştir
+    # Eşik: odanın çapının 2 katı (küçük odalar için sıkı, büyük için gevşek)
     used: set[int] = set()
     for room in rooms:
+        area   = _polygon_area(room["pts"])
+        radius = math.sqrt(area / math.pi)   # yaklaşık oda yarıçapı
+        thresh = max(radius * 3.0, 5.0)      # en az 5m, oda boyutuna göre ölçeklenir
+
         best_i, best_d = -1, float("inf")
         for i, lbl in enumerate(labels):
             if i in used:
@@ -62,7 +70,7 @@ def export_walls_to_ifc(
             d = math.hypot(lbl["x"] - room["cx"], lbl["y"] - room["cy"])
             if d < best_d:
                 best_d, best_i = d, i
-        if best_i >= 0 and best_d < 50.0:   # 50 m eşik (koordinatlar m cinsinden)
+        if best_i >= 0 and best_d <= thresh:
             room["name"]      = labels[best_i]["name"]
             room["number"]    = labels[best_i]["number"]
             room["area_attr"] = labels[best_i]["area"]
