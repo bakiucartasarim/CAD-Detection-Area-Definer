@@ -43,7 +43,6 @@ def colorize_rooms(dxf_path: str) -> dict:
     wall_layers = {n for n, t in layer_types.items() if t == "walls"}
 
     rooms = _build_room_list(data, wall_layers, ls)
-    rooms = _deduplicate_rooms(rooms)   # duplike polyline'ları at
     labels = _collect_labels(data["entities"], ls)
     _match_labels(rooms, labels)
 
@@ -166,7 +165,7 @@ def _match_labels(rooms, labels):
     used: set[int] = set()
     for room in rooms:
         radius = math.sqrt(room["area"] / math.pi)
-        thresh = max(radius * 4.0, 15.0)    # genişletilmiş eşik
+        thresh = max(radius * 3.0, 5.0)
         best_i = _find_best_label(room, labels, used)
         if best_i >= 0:
             d = math.hypot(labels[best_i]["x"] - room["cx"],

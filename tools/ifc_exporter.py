@@ -55,15 +55,12 @@ def export_walls_to_ifc(
     # Büyük bina dış sınırı polyline'larını filtrele (>200 m²)
     rooms = [r for r in rooms if _polygon_area(r["pts"]) <= 200.0]
 
-    # Duplike polyline'ları filtrele: merkezi 1.5m içindeyse küçük olanı at
-    rooms = _deduplicate_rooms(rooms)
-
     # Her odaya en yakın etiketi eşleştir
     used: set[int] = set()
     for room in rooms:
         area   = _polygon_area(room["pts"])
         radius = math.sqrt(area / math.pi)
-        thresh = max(radius * 4.0, 15.0)    # genişletilmiş eşik: min 15m
+        thresh = max(radius * 3.0, 5.0)
 
         best_i, best_d = -1, float("inf")
         for i, lbl in enumerate(labels):
