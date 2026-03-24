@@ -76,6 +76,7 @@ def export_walls_to_ifc(
         "spaces": len(rooms),
         "named_spaces": named,
         "walls": sum(len(r["pts"]) for r in rooms),
+        "slabs": len(rooms) * 2,   # zemin + tavan her oda için
         "output": output_path,
     }
 
@@ -189,6 +190,8 @@ def _build_ifc(rooms, wall_h, wall_t):
 
     spaces = []
     walls  = []
+    slabs  = []
+    SLAB_T = 0.20   # 20 cm döşeme kalınlığı
 
     for idx, room in enumerate(rooms):
         pts    = room["pts"]
@@ -218,6 +221,25 @@ def _build_ifc(rooms, wall_h, wall_t):
             "MahalNo":      r_num,
         })
         spaces.append(space)
+
+        # ── IfcSlab: zemin (z=0) ve tavan (z=wall_h) ─────────────────────
+        for slab_z, slab_label in [(0.0, "Zemin"), (wall_h, "Tavan")]:
+            s_poly = [_cp2(ifc, p[0], p[1]) for p in pts]
+            s_poly.append(s_poly[0])
+            s_profile = ifc.createIfcArbitraryClosedProfileDef(
+                "AREA", None, ifc.createIfcPolyline(s_poly))
+            s_solid = ifc.createIfcExtrudedAreaSolid(
+                s_profile, _ax3(ifc, _cp3(ifc, 0, 0, 0)),
+                _dir3(ifc, 0, 0, 1), float(SLAB_T))
+            s_shape = ifc.createIfcProductDefinitionShape(None, None, [
+                ifc.createIfcShapeRepresentation(body, "Body", "SweptSolid", [s_solid])])
+            slab = ifc.createIfcSlab(
+                _uid(), owner,
+                f"{slab_label}_{r_name or idx+1}", None, None,
+                _placement(ifc, storey.ObjectPlacement, 0., 0., slab_z),
+                s_shape, None,
+                "FLOOR" if slab_label == "Zemin" else "ROOF")
+            slabs.append(slab)
 
         # IfcWall per edge
         n = len(pts)
@@ -253,6 +275,9 @@ def _build_ifc(rooms, wall_h, wall_t):
     if walls:
         ifc.createIfcRelContainedInSpatialStructure(
             _uid(), owner, None, None, walls, storey)
+    if slabs:
+        ifc.createIfcRelContainedInSpatialStructure(
+            _uid(), owner, None, None, slabs, storey)
 
     return ifc
 
