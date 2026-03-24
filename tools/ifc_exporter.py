@@ -55,13 +55,15 @@ def export_walls_to_ifc(
     # Büyük bina dış sınırı polyline'larını filtrele (>200 m²)
     rooms = [r for r in rooms if _polygon_area(r["pts"]) <= 200.0]
 
+    # Duplike polyline'ları filtrele: merkezi 1.5m içindeyse küçük olanı at
+    rooms = _deduplicate_rooms(rooms)
+
     # Her odaya en yakın etiketi eşleştir
-    # Eşik: odanın çapının 2 katı (küçük odalar için sıkı, büyük için gevşek)
     used: set[int] = set()
     for room in rooms:
         area   = _polygon_area(room["pts"])
-        radius = math.sqrt(area / math.pi)   # yaklaşık oda yarıçapı
-        thresh = max(radius * 3.0, 5.0)      # en az 5m, oda boyutuna göre ölçeklenir
+        radius = math.sqrt(area / math.pi)
+        thresh = max(radius * 4.0, 15.0)    # genişletilmiş eşik: min 15m
 
         best_i, best_d = -1, float("inf")
         for i, lbl in enumerate(labels):
@@ -311,3 +313,31 @@ def _polygon_area(pts):
         j = (i + 1) % n
         a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1]
     return abs(a) / 2.0
+
+
+def _deduplicate_rooms(rooms: list) -> list:
+    """
+    Merkezi 1.5m içinde olan duplike polyline'ları filtrele.
+    Aynı konumdaki birden fazla polygon varsa en büyük alanı tut.
+    (İç/dış duvar çizgisinden oluşan çift polyline sorununu çözer.)
+    """
+    kept = []
+    used_indices: set[int] = set()
+    # Alan büyükten küçüğe sırala — büyük olanı koru
+    sorted_rooms = sorted(enumerate(rooms),
+                          key=lambda x: _polygon_area(x[1]["pts"]), reverse=True)
+    for orig_idx, room in sorted_rooms:
+        if orig_idx in used_indices:
+            continue
+        cx, cy = room["cx"], room["cy"]
+        # Kendisiyle merkezi 1.5m içinde olan tüm diğer odaları işaretle
+        for other_idx, other in enumerate(rooms):
+            if other_idx == orig_idx or other_idx in used_indices:
+                continue
+            if math.hypot(other["cx"] - cx, other["cy"] - cy) < 1.5:
+                used_indices.add(other_idx)
+        used_indices.add(orig_idx)
+        kept.append(room)
+    # Orijinal sırayı koru
+    kept_set = set(id(r) for r in kept)
+    return [r for r in rooms if id(r) in kept_set]

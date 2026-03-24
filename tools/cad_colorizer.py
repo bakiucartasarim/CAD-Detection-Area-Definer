@@ -43,6 +43,7 @@ def colorize_rooms(dxf_path: str) -> dict:
     wall_layers = {n for n, t in layer_types.items() if t == "walls"}
 
     rooms = _build_room_list(data, wall_layers, ls)
+    rooms = _deduplicate_rooms(rooms)   # duplike polyline'ları at
     labels = _collect_labels(data["entities"], ls)
     _match_labels(rooms, labels)
 
@@ -140,11 +141,32 @@ def _build_room_list(data, wall_layers, ls):
     return rooms
 
 
+def _deduplicate_rooms(rooms: list) -> list:
+    """Merkezi 1.5m içinde olan duplike polyline'ları at, en büyük olanı tut."""
+    kept = []
+    used_indices: set[int] = set()
+    sorted_rooms = sorted(enumerate(rooms),
+                          key=lambda x: x[1]["area"], reverse=True)
+    for orig_idx, room in sorted_rooms:
+        if orig_idx in used_indices:
+            continue
+        for other_idx, other in enumerate(rooms):
+            if other_idx == orig_idx or other_idx in used_indices:
+                continue
+            if math.hypot(other["cx"] - room["cx"],
+                          other["cy"] - room["cy"]) < 1.5:
+                used_indices.add(other_idx)
+        used_indices.add(orig_idx)
+        kept.append(room)
+    kept_set = set(id(r) for r in kept)
+    return [r for r in rooms if id(r) in kept_set]
+
+
 def _match_labels(rooms, labels):
     used: set[int] = set()
     for room in rooms:
         radius = math.sqrt(room["area"] / math.pi)
-        thresh = max(radius * 3.0, 5.0)
+        thresh = max(radius * 4.0, 15.0)    # genişletilmiş eşik
         best_i = _find_best_label(room, labels, used)
         if best_i >= 0:
             d = math.hypot(labels[best_i]["x"] - room["cx"],
