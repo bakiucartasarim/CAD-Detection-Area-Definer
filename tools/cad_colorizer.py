@@ -61,9 +61,19 @@ def colorize_rooms(dxf_path: str) -> dict:
     unmatched_labels = [labels[i] for i in range(len(labels)) if i not in used]
 
     # ── GstarCAD Bağlantısı ──────────────────────────────────────────────────
-    acad = win32com.client.GetActiveObject("GstarCAD.Application")
-    doc  = acad.ActiveDocument
-    msp  = doc.ModelSpace
+    import time as _time
+    for attempt in range(3):
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+            msp  = doc.ModelSpace
+            # Bağlantı testi
+            _ = msp.Count
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            _time.sleep(3)
 
     _clear_layers(msp, [LAYER_GREEN, LAYER_BLUE, LAYER_RED,
                         "DUVAR-HATCH", "MAHAL-TANIMLI", "MAHAL-TANIMSIZ"])
