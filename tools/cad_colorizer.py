@@ -165,7 +165,7 @@ def _match_labels(rooms, labels):
     used: set[int] = set()
     for room in rooms:
         radius = math.sqrt(room["area"] / math.pi)
-        thresh = max(radius * 3.0, 5.0)
+        thresh = max(radius * 3.0 + 1.0, 6.0)  # +1m buffer
         best_i = _find_best_label(room, labels, used)
         if best_i >= 0:
             d = math.hypot(labels[best_i]["x"] - room["cx"],

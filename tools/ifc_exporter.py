@@ -60,7 +60,7 @@ def export_walls_to_ifc(
     for room in rooms:
         area   = _polygon_area(room["pts"])
         radius = math.sqrt(area / math.pi)
-        thresh = max(radius * 3.0, 5.0)
+        thresh = max(radius * 3.0 + 1.0, 6.0)  # +1m buffer: büyük odaların label'i uzağa konulabiliyor
 
         best_i, best_d = -1, float("inf")
         for i, lbl in enumerate(labels):
