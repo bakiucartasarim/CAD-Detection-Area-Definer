@@ -79,21 +79,40 @@ def colorize_rooms(dxf_path: str) -> dict:
                         "DUVAR-HATCH", "MAHAL-TANIMLI", "MAHAL-TANIMSIZ"])
     _ensure_layers(doc, {LAYER_GREEN: 3, LAYER_BLUE: 5, LAYER_RED: 1})
 
-    gcad_polys = _collect_gcad_polys(msp, wall_layers, ls)
-
     green = blue = red = 0
 
-    for poly, room in zip(gcad_polys, rooms):
+    # Geçici polyline oluştur → hatch uygula → polyline sil
+    # Bu yaklaşım mevcut nesneleri taramadan çalışır.
+    for room in rooms:
+        pts = room.get("points", [])
+        if len(pts) < 3:
+            continue
         layer = LAYER_GREEN if room["name"] else LAYER_BLUE
         color = 3           if room["name"] else 5
         try:
+            # Koordinatları DXF biriminden CAD birimine çevir (ls tersine)
+            flat = []
+            for p in pts:
+                flat.extend([p[0] / ls, p[1] / ls])
+            coords_var = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_R8, flat)
+            # Geçici kapalı polyline oluştur
+            tmp_poly = msp.AddLightWeightPolyline(coords_var)
+            tmp_poly.Closed = True
+            tmp_poly.Layer = layer
+
+            # Hatch oluştur ve geçici polyline'ı boundary olarak ekle
             outer = win32com.client.VARIANT(
-                pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [poly])
+                pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [tmp_poly])
             h = msp.AddHatch(0, "SOLID", True)
             h.Layer = layer
             h.Color = color
             h.AppendOuterLoop(outer)
             h.Evaluate()
+
+            # Geçici polyline'ı sil (hatch bağımsız kalır)
+            tmp_poly.Delete()
+
             if room["name"]:
                 green += 1
             else:
@@ -146,7 +165,7 @@ def _build_room_list(data, wall_layers, ls):
             continue
         cx = sum(p[0] for p in pts_m) / len(pts_m)
         cy = sum(p[1] for p in pts_m) / len(pts_m)
-        rooms.append({"cx": cx, "cy": cy, "name": "", "area": area})
+        rooms.append({"cx": cx, "cy": cy, "name": "", "area": area, "area_m2": area, "points": pts_m})
     return rooms
 
 
@@ -198,17 +217,12 @@ def _find_best_label(room, labels, used):
 
 
 def _clear_layers(msp, layer_names):
-    to_del = []
-    for i in range(msp.Count):
+    """Hedef layerlardaki nesneleri LISP komutuyla siler."""
+    doc = msp.Application.ActiveDocument
+    for layer_name in layer_names:
         try:
-            e = msp.Item(i)
-            if e.Layer in layer_names:
-                to_del.append(e)
-        except Exception:
-            pass
-    for e in to_del:
-        try:
-            e.Delete()
+            cmd = f'(command "._ERASE" (ssget "X" (list (cons 8 "{layer_name}"))) "")\n'
+            doc.SendCommand(cmd)
         except Exception:
             pass
 
@@ -223,19 +237,41 @@ def _ensure_layers(doc, layer_colors: dict):
 
 
 def _collect_gcad_polys(msp, wall_layers, ls):
+    """SelectionSet ile layer+tip filtresi uygular — tüm nesneleri taramaz."""
+    import win32com.client, pythoncom
+    doc = msp.Application.ActiveDocument
     polys = []
-    for i in range(msp.Count):
+
+    for layer_name in wall_layers:
+        sel_name = "_TMP_WALL_SEL"
         try:
-            e = msp.Item(i)
-            if (e.Layer.lower() in {n.lower() for n in wall_layers}
-                    and e.EntityName == "AcDbPolyline"
-                    and e.Closed):
-                coords = e.Coordinates
-                n = len(coords) // 2
-                pts_m = [[coords[j * 2] * ls, coords[j * 2 + 1] * ls]
-                         for j in range(n)]
-                if _polygon_area(pts_m) <= MAX_AREA_M2:
-                    polys.append(e)
+            doc.SelectionSets.Item(sel_name).Delete()
         except Exception:
             pass
+        try:
+            sel = doc.SelectionSets.Add(sel_name)
+            ft = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_I2,
+                [0, 8])  # 0=DXF tipi, 8=layer
+            fd = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_BSTR,
+                ["LWPOLYLINE", layer_name])
+            sel.Select(5, None, None, ft, fd)  # 5=ssget ALL
+            for i in range(sel.Count):
+                try:
+                    e = sel.Item(i)
+                    if not e.Closed:
+                        continue
+                    coords = e.Coordinates
+                    n = len(coords) // 2
+                    pts_m = [[coords[j * 2] * ls, coords[j * 2 + 1] * ls]
+                             for j in range(n)]
+                    if _polygon_area(pts_m) <= MAX_AREA_M2:
+                        polys.append(e)
+                except Exception:
+                    pass
+            sel.Delete()
+        except Exception:
+            pass
+
     return polys

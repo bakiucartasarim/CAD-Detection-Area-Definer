@@ -266,5 +266,327 @@ def colorize_rooms_in_cad(dxf_path: str) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@mcp.tool()
+def clean_lighting(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 1 — Aydınlatma temizleme.
+    DXF'ten tüm aydınlatma armatürlerini ve hatch taramalarını kaldırır.
+    Duvarları açığa çıkarmak için ilk adımdır.
+
+    Kaldırılanlar:
+      • Aydınlatma layer'larındaki tüm INSERT (armatür sembolleri)
+      • Modelspace'deki tüm HATCH (duvar/kolon taramaları)
+      • Blok tanımları içindeki HATCH (mimari bloklar)
+
+    Args:
+        dxf_path   : Kaynak DXF dosyasının tam yolu
+        output_path: Çıktı yolu (boş bırakılırsa _TEMIZ suffix eklenir)
+
+    Döner:
+        Silinen entity sayıları ve çıktı dosya yolu
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+
+    _LIGHTING_LAYERS = {
+        "E-SEMBOL", "ELKSEMBOL", "ELEKTRIK", "KZY.SEMBOL",
+        "MYSEMBOL", "KZY-SEMBOL", "KZY.AYDINLATMA",
+        "MYAYDINLATMA", "B_AYDINLATMA", "1-ARMATUR"
+    }
+
+    def _is_lighting_layer(lu: str) -> bool:
+        if "AYDINLATMA" in lu or "ARMATUR" in lu or "ARMATÜR" in lu:
+            return True
+        if "HAT" in lu or "KESIT" in lu:
+            return False
+        return lu in _LIGHTING_LAYERS
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    # 1. Armatür INSERT'lerini sil
+    armatur_del = []
+    for e in msp:
+        if e.dxftype() == "INSERT" and _is_lighting_layer(e.dxf.layer.upper()):
+            armatur_del.append(e)
+    for e in armatur_del:
+        msp.delete_entity(e)
+
+    # 2. Modelspace HATCH sil
+    hatch_msp = [e for e in msp if e.dxftype() == "HATCH"]
+    for e in hatch_msp:
+        msp.delete_entity(e)
+
+    # 3. Blok tanımları içindeki HATCH sil (armatür blokları hariç)
+    armatur_block_names = {e.dxf.name for e in msp if e.dxftype() == "INSERT"}
+    hatch_block = 0
+    for block in doc.blocks:
+        if block.name in armatur_block_names:
+            continue
+        hatches = [e for e in block if e.dxftype() == "HATCH"]
+        for e in hatches:
+            block.delete_entity(e)
+        hatch_block += len(hatches)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_TEMIZ" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "armatür_silindi": len(armatur_del),
+        "hatch_modelspace_silindi": len(hatch_msp),
+        "hatch_blok_silindi": hatch_block,
+        "toplam_silindi": len(armatur_del) + len(hatch_msp) + hatch_block,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "clean_cables() ile kablo hatlarını temizleyin"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def clean_cables(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 2 — Kablo/hat temizleme.
+    clean_lighting() sonrasında çalıştırılır.
+    Kablo, priz ve toplama hattı layer'larındaki entity'leri kaldırır.
+
+    Kaldırılanlar:
+      • *HAT* layer'larındaki LINE ve LWPOLYLINE (aydınlatma/priz/toplama hatları)
+      • *PRIZ* layer'larındaki INSERT (priz sembolleri)
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle clean_lighting çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _KABLO suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+
+    def _is_cable_layer(lu: str) -> bool:
+        return ("HAT" in lu or "KABLO" in lu or "CABLE" in lu
+                or "PRIZ" in lu or "TOPRAK" in lu or "TOPLAMA" in lu)
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    kablo_del = []
+    for e in msp:
+        layer = e.dxf.layer.upper()
+        if _is_cable_layer(layer) and e.dxftype() in ("LINE", "LWPOLYLINE", "INSERT", "MTEXT", "TEXT"):
+            kablo_del.append(e)
+    for e in kablo_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_KABLO" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "kablo_silindi": len(kablo_del),
+        "cikti_dosya": output_path,
+        "sonraki_adim": "detect_rooms() ile alan tespiti yapabilirsiniz"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def clean_block_hatches(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 3 — Blok referans içindeki hatch temizleme.
+    clean_cables() sonrasında çalıştırılır.
+    Modelspace'deki INSERT'lerin referans ettiği blok tanımları
+    içindeki tüm HATCH entity'lerini kaldırır.
+
+    Hedef bloklar: asma tavan, logo, mimari detay bloklarındaki taramalar.
+    Armatür blokları (aydınlatma layer'ında olanlar) korunur.
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle clean_cables çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _BLOK suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+
+    def _is_lighting_layer(lu: str) -> bool:
+        if "AYDINLATMA" in lu or "ARMATUR" in lu or "ARMATÜR" in lu:
+            return True
+        if "HAT" in lu or "KESIT" in lu:
+            return False
+        return lu in {"E-SEMBOL", "ELKSEMBOL", "ELEKTRIK", "KZY.SEMBOL",
+                      "MYSEMBOL", "KZY-SEMBOL", "1-ARMATUR"}
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    cleaned_blocks = {}
+    total = 0
+
+    for e in msp:
+        if e.dxftype() != "INSERT":
+            continue
+        # Armatür layer'ındaki INSERT'lerin bloklarını koru
+        if _is_lighting_layer(e.dxf.layer.upper()):
+            continue
+        block_name = e.dxf.name
+        if block_name in cleaned_blocks:
+            continue
+        try:
+            block = doc.blocks.get(block_name)
+            if block is None:
+                continue
+            hatches = [x for x in block if x.dxftype() == "HATCH"]
+            for h in hatches:
+                block.delete_entity(h)
+            if hatches:
+                cleaned_blocks[block_name] = len(hatches)
+                total += len(hatches)
+        except Exception:
+            pass
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_BLOK" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "temizlenen_blok_sayisi": len(cleaned_blocks),
+        "hatch_silindi": total,
+        "bloklar": cleaned_blocks,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "detect_rooms() ile alan tespiti yapabilirsiniz"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def clean_hatch(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 4 — Modelspace'deki tüm HATCH temizleme.
+    Pipeline'dan bağımsız, tek başına da kullanılabilir.
+    Modelspace'deki her türlü HATCH entity'sini kaldırır.
+    Blok tanımları içindekiler için clean_block_hatches() kullanın.
+
+    Args:
+        dxf_path   : Kaynak DXF dosyasının tam yolu
+        output_path: Çıktı yolu (boş bırakılırsa _HATCH suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    hatches = [e for e in msp if e.dxftype() == "HATCH"]
+    layer_dist = dict(_Counter(e.dxf.layer for e in hatches).most_common())
+
+    for e in hatches:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_HATCH" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "hatch_silindi": len(hatches),
+        "layer_dagilimi": layer_dist,
+        "cikti_dosya": output_path,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def delete_tefris(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 5 — Tefris/mobilya temizleme.
+    TEFRIS, _AB_TEFRIS, TEFRIS_YATAK, AKS_TEFRIS gibi
+    döşeme/mobilya layer'larındaki tüm entity'leri kaldırır.
+    Duvar iskeletini daha net ortaya çıkarır.
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle clean_hatch çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _TEFRIS suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    def _is_tefris_layer(lu: str) -> bool:
+        return ("TEFR" in lu or "MOBIL" in lu or "FURNITURE" in lu
+                or "AKS_TEFR" in lu or "AKS-TEFR" in lu)
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = [e for e in msp if _is_tefris_layer(e.dxf.layer.upper())]
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_TEFRIS" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "tefris_silindi": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "Alan tespiti için detect_rooms() kullanın"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def delete_ceiling(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 6 — Tavan/asma tavan temizleme.
+    ASMA TAVAN, TAVAN, CEILING gibi layer'lardaki
+    tüm entity'leri kaldırır.
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle delete_tefris çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _TAVAN suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    def _is_ceiling_layer(lu: str) -> bool:
+        return ("TAVAN" in lu or "ASMA" in lu or "CEILING" in lu
+                or "SUSPEND" in lu)
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = [e for e in msp if _is_ceiling_layer(e.dxf.layer.upper())]
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_TAVAN" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "tavan_silindi": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "detect_rooms() ile alan tespiti yapabilirsiniz"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 if __name__ == "__main__":
     mcp.run()
