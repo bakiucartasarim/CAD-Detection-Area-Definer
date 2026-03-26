@@ -57,16 +57,19 @@ def _rooms_from_mahal_blocks(dxf_path: str, uf: float, min_area_m2: float) -> li
         if ent.dxftype() != "INSERT":
             continue
         layer = ent.dxf.layer.lower()
-        if not any(kw in layer for kw in ("mahal", "room", "space", "0asm-mahal")):
+        block_name = ent.dxf.name.upper()
+        if not (any(kw in layer for kw in ("mahal", "room", "space", "0asm-mahal"))
+                or "MAHAL" in block_name):
             continue
         if not hasattr(ent, "attribs") or not ent.attribs:
             continue
 
         attrs = {a.dxf.tag.upper(): a.dxf.text for a in ent.attribs}
         name = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or
-                attrs.get("MAHAL_ADI") or attrs.get("ROOM_NAME") or "")
+                attrs.get("MAHAL_ADI") or attrs.get("ROOM_NAME") or
+                attrs.get("MAHAL") or "")
         area_str = (attrs.get("ALAN:NAME") or attrs.get("ALAN") or
-                    attrs.get("AREA") or "0")
+                    attrs.get("AREA") or _find_area_attr_fuzzy(attrs) or "0")
         try:
             area_m2 = float(str(area_str).replace(",", ".").replace("m2", "").strip())
             if area_m2 > 1000:
@@ -256,3 +259,23 @@ def _collect_elements(entities: list, layer_types: dict, etype: str) -> list[dic
 
 def _nearby(elements: list, cx: float, cy: float, threshold: float) -> int:
     return sum(1 for e in elements if math.hypot(e["x"] - cx, e["y"] - cy) < threshold)
+
+
+def _find_area_attr_fuzzy(attrs: dict) -> str:
+    """
+    Türkçe/encoding bozuk alan attribute'larını yakalar.
+    MÜ, MU, M2, ALAN veya 'm2'/'m²' içeren ilk değeri döner.
+    """
+    for key in ("MÜ", "MU", "M2", "ALAN", "ALAN:NAME", "AREA"):
+        if key in attrs and attrs[key].strip():
+            return attrs[key]
+    # Encoding bozuk: değer m2/m² içeriyorsa al
+    for v in attrs.values():
+        v = v.strip()
+        if v and ("m2" in v.lower() or "m²" in v):
+            return v
+    # 'M' ile başlayan ≤3 karakter key
+    for k, v in attrs.items():
+        if k.startswith("M") and len(k) <= 3 and v.strip():
+            return v
+    return ""

@@ -89,22 +89,31 @@ def export_walls_to_ifc(
 
 
 def _collect_labels(entities: list, linear_scale: float) -> list[dict]:
-    """MAHAL BLOCK INSERT'lerinden isim/numara/alan oku."""
+    """MAHAL BLOCK INSERT'lerinden isim/numara/alan oku.
+    Format A: ROOMOBJECTS:NAME, ROOMOBJECTS:NUMBER, ALAN:NAME
+    Format B: MAHAL, MAHALNO, MÜ (alan)
+    """
     labels = []
     for ent in entities:
         if ent["type"] != "INSERT":
             continue
         layer = ent.get("layer", "").lower()
-        if not any(kw in layer for kw in ("mahal", "room", "space")):
+        block_name = ent.get("block_name", "").upper()
+        if not (any(kw in layer for kw in ("mahal", "room", "space"))
+                or "MAHAL" in block_name):
             continue
         attrs = ent.get("attrs", {})
         if not attrs:
             continue
+        # Format A
         name   = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or
-                  attrs.get("MAHAL_ADI") or "").strip()
-        number = (attrs.get("ROOMOBJECTS:NUMBER") or attrs.get("NUMBER") or "").strip()
+                  attrs.get("MAHAL_ADI") or
+                  # Format B
+                  attrs.get("MAHAL") or "").strip()
+        number = (attrs.get("ROOMOBJECTS:NUMBER") or attrs.get("NUMBER") or
+                  attrs.get("MAHALNO") or "").strip()
         area   = (attrs.get("ALAN:NAME") or attrs.get("ALAN") or
-                  attrs.get("AREA") or "").strip()
+                  attrs.get("AREA") or _find_area_attr_labels(attrs) or "").strip()
         if not name and not number:
             continue
         labels.append({
@@ -115,6 +124,21 @@ def _collect_labels(entities: list, linear_scale: float) -> list[dict]:
             "area":   area,
         })
     return labels
+
+
+def _find_area_attr_labels(attrs: dict) -> str:
+    """MÜ, MU, M2 veya 'm2/m²' içeren encoding-bozuk alan attribute'unu döner."""
+    for key in ("MÜ", "MU", "M2"):
+        if key in attrs and attrs[key].strip():
+            return attrs[key]
+    for v in attrs.values():
+        v = v.strip()
+        if v and ("m2" in v.lower() or "m²" in v):
+            return v
+    for k, v in attrs.items():
+        if k.startswith("M") and len(k) <= 3 and v.strip():
+            return v
+    return ""
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

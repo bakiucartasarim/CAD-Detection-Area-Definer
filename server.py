@@ -2,13 +2,23 @@
 server.py — CAD Detection Area Definer MCP Server
 
 Claude'a şu araçları açar:
-  • analyze_cad       → DXF dosyasındaki katmanları ve entity sayılarını döner
-  • detect_rooms      → Oda poligonlarını, alanlarını ve etiketlerini çıkarır
-  • classify_elements → Katmanları duvar/kapı/pencere/mobilya olarak sınıflandırır
-  • get_unknown_layers→ Tanımlanamayan katmanları listeler
-  • train_layer       → Yeni katman → tip eşleştirmesi öğretir
-  • get_room_geometry → Tek bir odanın tam geometrisini döner
-  • export_walls_ifc  → Duvar polyline'larını IfcSpace+IfcWall olarak dışa aktarır
+  • analyze_cad              → DXF katmanları ve entity sayıları
+  • detect_rooms             → Oda poligonları, alanları ve etiketleri
+  • classify_elements        → Katmanları duvar/kapı/pencere/mobilya olarak sınıflandırır
+  • get_unknown_layers       → Tanımlanamayan katmanları listeler
+  • train_layer              → Yeni katman → tip eşleştirmesi öğretir
+  • get_room_geometry        → Tek bir odanın tam geometrisi
+  • export_walls_ifc         → Duvar polyline'larını IFC olarak dışa aktarır
+  • colorize_rooms_in_cad    → GstarCAD'de polygon odaları renklendir (ADIM 0)
+  • clean_lighting           → Armatür + hatch temizle (ADIM 1)
+  • clean_cables             → Kablo/hat layer temizle (ADIM 2)
+  • clean_block_hatches      → Blok içi hatch temizle (ADIM 3)
+  • clean_hatch              → Modelspace hatch temizle (ADIM 4)
+  • delete_tefris            → Tefris/mobilya temizle (ADIM 5)
+  • delete_ceiling           → Tavan/asma tavan temizle (ADIM 6)
+  • delete_linye             → Linye numaraları temizle (ADIM 7)
+  • delete_electric_component→ Elektrik bileşen temizle (ADIM 8)
+  • colorize_mahal_blocks    → MAHAL bloklarını GstarCAD'de renklendir (ADIM 9)
 """
 from __future__ import annotations
 import json
@@ -698,6 +708,165 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
         "sonraki_adim":   "detect_rooms() ile alan tespiti yapabilirsiniz"
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def colorize_mahal_blocks(dxf_path: str) -> str:
+    """
+    ADIM 9 — MAHAL bloklarını GstarCAD'de renkli daire+metin olarak işaretle.
+    DXF'teki MAHAL_MEVCUT_R01 (ve benzeri MAHAL*) INSERT bloklarını okur,
+    GstarCAD'deki aktif çizimde her oda için renkli daire + isim çizer.
+
+    Renk şeması:
+      Yeşil  (MAHAL-YESIL,    color 3) → MAHAL adı tanımlı oda
+      Mavi   (MAHAL-MAVI,     color 5) → Adı olmayan oda (koordinat var)
+      Kırmızı(MAHAL-KIRMIZI,  color 1) → Alan bilgisi 0 olan oda
+
+    GstarCAD açık ve aynı DXF yüklü olmalıdır.
+
+    Args:
+        dxf_path: DXF dosyasının tam yolu
+    """
+    import win32com.client
+    import pythoncom
+    import math as _math
+    import time as _time
+    import re as _re
+    import ezdxf as _ezdxf
+
+    LAYER_GREEN  = "MAHAL-YESIL"
+    LAYER_BLUE   = "MAHAL-MAVI"
+    LAYER_RED    = "MAHAL-KIRMIZI"
+
+    def _parse_area(s: str) -> float:
+        s = str(s).replace(",", ".").replace("m2", "").replace("m\u00b2", "").strip()
+        m = _re.search(r"[\d.]+", s)
+        try:
+            return float(m.group()) if m else 0.0
+        except ValueError:
+            return 0.0
+
+    def _find_mu(attrs: dict) -> str:
+        for key in ("\u00dc", "M\u00fc", "MU", "M2", "M\ufffd"):
+            if key in attrs and attrs[key].strip():
+                return attrs[key]
+        for v in attrs.values():
+            v = v.strip()
+            if v and ("m2" in v.lower() or "m\u00b2" in v):
+                return v
+        for k, v in attrs.items():
+            if k.startswith("M") and len(k) <= 3 and v.strip():
+                return v
+        return ""
+
+    # ── DXF'ten MAHAL bloklarını oku ────────────────────────────────────────
+    doc = _ezdxf.readfile(dxf_path)
+    msp_dxf = doc.modelspace()
+    rooms = []
+    for ent in msp_dxf:
+        if ent.dxftype() != "INSERT":
+            continue
+        bn    = ent.dxf.name.upper()
+        layer = ent.dxf.layer.upper()
+        if "MAHAL" not in bn and "MAHAL" not in layer:
+            continue
+        if not hasattr(ent, "attribs") or not ent.attribs:
+            continue
+        attrs  = {a.dxf.tag.upper(): a.dxf.text for a in ent.attribs}
+        name   = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or
+                  attrs.get("MAHAL_ADI") or attrs.get("MAHAL") or "").strip()
+        number = (attrs.get("MAHALNO") or attrs.get("ROOMOBJECTS:NUMBER") or "").strip()
+        area_s = _find_mu(attrs)
+        area   = _parse_area(area_s)
+        rooms.append({
+            "name": name, "number": number, "area": area,
+            "x": ent.dxf.insert.x, "y": ent.dxf.insert.y,
+        })
+
+    if not rooms:
+        return '{"error": "MAHAL blogu bulunamadi. DXF dosyasini kontrol edin."}'
+
+    # ── GstarCAD bağlantısı ──────────────────────────────────────────────────
+    for attempt in range(3):
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            cad_doc  = acad.ActiveDocument
+            cad_msp  = cad_doc.ModelSpace
+            _ = cad_msp.Count
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            _time.sleep(3)
+
+    # Önceki MAHAL katmanlarını temizle
+    for layer_name in (LAYER_GREEN, LAYER_BLUE, LAYER_RED):
+        try:
+            cmd = f'(command "._ERASE" (ssget "X" (list (cons 8 "{layer_name}"))) "")\n'
+            cad_doc.SendCommand(cmd)
+        except Exception:
+            pass
+
+    # Katmanları oluştur
+    for name, color in ((LAYER_GREEN, 3), (LAYER_BLUE, 5), (LAYER_RED, 1)):
+        try:
+            lyr = cad_doc.Layers.Add(name)
+        except Exception:
+            lyr = cad_doc.Layers.Item(name)
+        lyr.Color = color
+
+    green = blue = red = 0
+
+    for room in rooms:
+        dx, dy  = room["x"], room["y"]
+        area    = room["area"]
+        name    = room["name"]
+        number  = room["number"]
+
+        # Daire yarıçapı: alanı temsil eden daire (mm²)
+        if area > 0:
+            r = _math.sqrt(area * 1e6 / _math.pi)   # m² → mm²
+        else:
+            r = 500.0
+
+        if name:
+            layer = LAYER_GREEN; color = 3; green += 1
+        elif area > 0:
+            layer = LAYER_BLUE;  color = 5; blue  += 1
+        else:
+            layer = LAYER_RED;   color = 1; red   += 1
+
+        try:
+            pt = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_R8, [dx, dy, 0.0])
+            circ = cad_msp.AddCircle(pt, r)
+            circ.Layer = layer
+            circ.Color = color
+
+            label = f"{name} ({number})" if number else name or number or "?"
+            if area > 0:
+                label += f" {area:.1f}m2"
+            tp = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_R8, [dx, dy + r * 0.1, 0.0])
+            txt = cad_msp.AddText(label, tp, r * 0.15)
+            txt.Layer = layer
+            txt.Color = color
+        except Exception:
+            pass
+
+    cad_doc.Regen(1)
+
+    result = {
+        "toplam_oda": len(rooms),
+        "yesil_isimli": green,
+        "mavi_isimsiz": blue,
+        "kirmizi_alansiz": red,
+        "summary": (
+            f"{green} yesil (isimli), {blue} mavi (isimsiz), "
+            f"{red} kirmizi (alansiz) — toplam {len(rooms)} oda"
+        )
+    }
+    return __import__("json").dumps(result, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
