@@ -588,5 +588,117 @@ def delete_ceiling(dxf_path: str, output_path: str = "") -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@mcp.tool()
+def delete_linye(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 7 — Elektrik kablo linye numaralarını temizleme.
+    LİNYE layer'ındaki daire + çizgi + text üçlüsünden oluşan
+    A1, A2...An linye numarası sembollerini kaldırır.
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle delete_ceiling çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _LINYE suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    def _is_linye_layer(lu: str) -> bool:
+        return "NYE" in lu or "LINYE" in lu or "L\ufffdNYE" in lu
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = [e for e in msp if _is_linye_layer(e.dxf.layer.upper())]
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+    type_dist  = dict(_Counter(e.dxftype()  for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_LINYE" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "linye_silindi": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "tip_dagilimi": type_dist,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "delete_electric_component() ile elektrik bileşenlerini temizleyin"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 8 — Elektrik bileşen/sembol temizleme.
+    Kablo sayı göstergeleri ('3','4','b','kom','ADİ','EKOM'),
+    priz, anahtar, sigorta, panel sembollerini kaldırır.
+
+    Hedef layer'lar: *ELEKTR*, *SEMBOL*, *PRIZ*, *ANAHTAR*,
+                     *SIGORTA*, *PANEL*, *ROZET*, *SWITCH*, *SOCKET*
+    Hedef bloklar  : '2','3','4','5','b','kom','ADİ','EKOM','EADI',
+                     ve *HAT* layer'larındaki tüm INSERT'ler
+
+    Args:
+        dxf_path   : Kaynak DXF
+        output_path: Çıktı yolu (boş bırakılırsa _ELEC suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    # Kablo sayı/tip gösterge blok isimleri
+    _CABLE_MARKER_BLOCKS = {
+        '1','2','3','4','5','6','7','8','9',
+        'b','B','kom','KOM','ADİ','ADI','EKOM',
+        'EADI','EADİ','EVAV','VAV','IT'
+    }
+
+    def _is_electric_layer(lu: str) -> bool:
+        return any(k in lu for k in (
+            'ELEKTR', 'SEMBOL', 'PRIZ', 'ANAHTAR',
+            'SIGORTA', 'PANEL', 'ROZET', 'SWITCH',
+            'SOCKET', 'AYDINLATMA', 'ARMATUR', 'ARMATÜR'
+        )) or 'HAT' in lu
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = []
+    for e in msp:
+        if e.dxftype() != 'INSERT':
+            continue
+        layer = e.dxf.layer.upper()
+        name  = e.dxf.name
+        if _is_electric_layer(layer) or name in _CABLE_MARKER_BLOCKS:
+            to_del.append(e)
+
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+    block_dist = dict(_Counter(e.dxf.name  for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_ELEC" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "silinen_insert": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "blok_dagilimi":  block_dist,
+        "cikti_dosya":    output_path,
+        "sonraki_adim":   "detect_rooms() ile alan tespiti yapabilirsiniz"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 if __name__ == "__main__":
     mcp.run()
