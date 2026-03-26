@@ -790,9 +790,14 @@ def colorize_mahal_blocks(dxf_path: str) -> str:
     for attempt in range(3):
         try:
             acad = win32com.client.GetActiveObject("GstarCAD.Application")
-            cad_doc  = acad.ActiveDocument
-            cad_msp  = cad_doc.ModelSpace
-            _ = cad_msp.Count
+            # Açık belge yoksa DXF'i otomatik aç
+            try:
+                cad_doc = acad.ActiveDocument
+                _ = cad_doc.ModelSpace.Count
+            except Exception:
+                cad_doc = acad.Documents.Open(dxf_path)
+                _time.sleep(2)
+            cad_msp = cad_doc.ModelSpace
             break
         except Exception:
             if attempt == 2:
