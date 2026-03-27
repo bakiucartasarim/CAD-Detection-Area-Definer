@@ -755,6 +755,83 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
 
 
 @mcp.tool()
+def delete_bara(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 9 — Bara (busbar) ve bağlı kablo çizgilerini temizleme.
+    Elektrik dağıtım baralarını ve bağlantı kablolarını kaldırır.
+
+    İki yöntemle tespit eder:
+      A) Layer adı: BARA, BUS, PANO, PANEL, DAGIT, OG, AG HAT içeren layer'lar
+      B) Renk kodu: Layer='0' üzerinde explicit color=3 (yeşil) olan LINE/LWPOLYLINE/ARC
+         (elektrikçiler default layer üzerine yeşil renk ile bara çizer)
+
+    Kaldırılanlar:
+      • Bara layer'larındaki tüm entity'ler
+      • Layer '0' + explicit green (color=3) LINE / LWPOLYLINE / ARC
+      • AydPrizLinyesi ve benzeri panel linyesi layer'ları
+
+    Args:
+        dxf_path   : Kaynak DXF (genellikle delete_electric_component çıktısı)
+        output_path: Çıktı yolu (boş bırakılırsa _BARA suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    _BARA_LAYER_KWS = (
+        'BARA', 'BUS', 'PANO', 'PANEL', 'DAGIT', 'DAĞIT',
+        'OG HAT', 'AG HAT', 'TRAFO', 'KESICI', 'FIDERI',
+        'AYDINLATMAPRIZ', 'AYDPRIZ', 'LINYE',
+    )
+    _WIRE_TYPES = ('LINE', 'LWPOLYLINE', 'ARC', 'SPLINE')
+
+    def _is_bara_layer(lu: str) -> bool:
+        return any(k in lu for k in _BARA_LAYER_KWS)
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = []
+    for e in msp:
+        layer = e.dxf.layer.upper()
+        etype = e.dxftype()
+
+        # A) Bilinen bara layer adları — tüm entity tipleri
+        if _is_bara_layer(layer):
+            to_del.append(e)
+            continue
+
+        # B) Layer='0' + explicit color=3 (yeşil) — INSERT hariç
+        if e.dxf.layer == '0' and etype in _WIRE_TYPES:
+            try:
+                if e.dxf.color == 3:
+                    to_del.append(e)
+            except Exception:
+                pass
+
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+    type_dist  = dict(_Counter(e.dxftype()  for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_BARA" + p.suffix))
+
+    doc.saveas(output_path)
+
+    result = {
+        "bara_silindi": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "tip_dagilimi": type_dist,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "colorize_mahal_blocks() ile oda renklendirme yapabilirsiniz"
+    }
+    return __import__("json").dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 def colorize_mahal_blocks(dxf_path: str) -> str:
     """
     ADIM 9 — MAHAL bloklarını GstarCAD'de renkli daire+metin olarak işaretle.
