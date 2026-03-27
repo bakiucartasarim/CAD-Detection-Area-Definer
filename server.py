@@ -802,6 +802,199 @@ def colorize_rooms_in_cad(dxf_path: str) -> str:
 
 
 @mcp.tool()
+def export_rooms_ifc(
+    dxf_path: str,
+    output_path: str = "",
+    wall_offset_mm: float = 15.0,
+    room_height_m: float = 3.0,
+) -> str:
+    """
+    İŞARETLEME ADIM 4 — Eşleşen mekanları IFC dosyasına aktar.
+    match_rooms_to_polygons() verilerini kullanarak her mekan için IfcSpace oluşturur.
+    Her polygon wall_offset_mm kadar dışarıya genişletilir (duvar kalınlığı payı).
+
+    Args:
+        dxf_path      : Temizlenmiş DXF dosyasının tam yolu
+        output_path   : Çıktı IFC yolu (boş bırakılırsa _MEKAN.ifc olarak kaydeder)
+        wall_offset_mm: Dışa offset mm cinsinden (varsayılan: 15.0)
+        room_height_m : Mekan yüksekliği metre cinsinden (varsayılan: 3.0)
+    """
+    import math as _m, json as _json, uuid as _uuid, time as _time
+    import ifcopenshell
+
+    if not output_path:
+        base = os.path.splitext(dxf_path)[0]
+        output_path = base + "_MEKAN.ifc"
+
+    # ── 1. Eşleşmiş mekanları al ─────────────────────────────────────────────
+    data = _json.loads(match_rooms_to_polygons(dxf_path))
+    rooms_raw = [r for r in data["rooms"] if r["status"] != "unmatched" and r["points"]]
+
+    # ── 2. Polygon offset (miter join) ───────────────────────────────────────
+    def _offset_polygon(pts_mm, offset_mm):
+        n = len(pts_mm)
+        if n < 3:
+            return pts_mm
+        # Sarım yönü: CCW=pozitif alan
+        area2 = sum(
+            pts_mm[i][0] * pts_mm[(i+1)%n][1] - pts_mm[(i+1)%n][0] * pts_mm[i][1]
+            for i in range(n)
+        )
+        sign = 1 if area2 > 0 else -1   # CCW → dış normal sola, CW → sağa
+
+        result = []
+        for i in range(n):
+            p0 = pts_mm[(i-1) % n]
+            p1 = pts_mm[i]
+            p2 = pts_mm[(i+1) % n]
+
+            dx1, dy1 = p1[0]-p0[0], p1[1]-p0[1]
+            l1 = _m.hypot(dx1, dy1)
+            if l1 < 1e-9:
+                result.append(p1)
+                continue
+            n1x, n1y = -sign*dy1/l1, sign*dx1/l1   # kenar 1'in dış normali
+
+            dx2, dy2 = p2[0]-p1[0], p2[1]-p1[1]
+            l2 = _m.hypot(dx2, dy2)
+            if l2 < 1e-9:
+                result.append(p1)
+                continue
+            n2x, n2y = -sign*dy2/l2, sign*dx2/l2   # kenar 2'nin dış normali
+
+            bx, by = n1x+n2x, n1y+n2y
+            bl = _m.hypot(bx, by)
+            if bl < 1e-9:
+                bx, by, bl = n1x, n1y, 1.0
+            bx, by = bx/bl, by/bl
+
+            cos_h = n1x*bx + n1y*by
+            cos_h = max(abs(cos_h), 0.17) * (1 if cos_h >= 0 else -1)  # max 80° miter
+            miter = offset_mm / cos_h
+
+            result.append([p1[0] + bx*miter, p1[1] + by*miter])
+        return result
+
+    # ── 3. IFC oluştur ────────────────────────────────────────────────────────
+    def _uid():
+        return ifcopenshell.guid.compress(_uuid.uuid4().hex)
+
+    def _cp3(f, x, y, z=0.):
+        return f.createIfcCartesianPoint([float(x), float(y), float(z)])
+
+    def _cp2(f, x, y):
+        return f.createIfcCartesianPoint([float(x), float(y)])
+
+    def _dir3(f, x, y, z):
+        return f.createIfcDirection([float(x), float(y), float(z)])
+
+    def _ax3(f, origin, zd=None, xd=None):
+        return f.createIfcAxis2Placement3D(
+            origin,
+            zd or _dir3(f, 0, 0, 1),
+            xd or _dir3(f, 1, 0, 0),
+        )
+
+    def _placement(f, parent, x=0., y=0., z=0.):
+        return f.createIfcLocalPlacement(
+            parent, _ax3(f, _cp3(f, x, y, z)))
+
+    ifc = ifcopenshell.file(schema="IFC4")
+    org   = ifc.createIfcOrganization(None, "CAD Detection", None)
+    pers  = ifc.createIfcPerson(None, "Detector", "CAD")
+    pao   = ifc.createIfcPersonAndOrganization(pers, org)
+    app   = ifc.createIfcApplication(org, "1.0", "CAD Detection Area Definer", "CDAD")
+    owner = ifc.createIfcOwnerHistory(pao, app, None, "ADDED", None, pao, app, int(_time.time()))
+
+    ctx  = ifc.createIfcGeometricRepresentationContext(
+        None, "Model", 3, 1.0e-5, _ax3(ifc, _cp3(ifc, 0, 0, 0)), None)
+    body = ifc.createIfcGeometricRepresentationSubContext(
+        "Body", "Model", None, None, None, None, ctx, None, "MODEL_VIEW", None)
+
+    units = ifc.createIfcUnitAssignment([
+        ifc.createIfcSIUnit(None, "LENGTHUNIT",     None, "METRE"),
+        ifc.createIfcSIUnit(None, "AREAUNIT",       None, "SQUARE_METRE"),
+        ifc.createIfcSIUnit(None, "VOLUMEUNIT",     None, "CUBIC_METRE"),
+        ifc.createIfcSIUnit(None, "PLANEANGLEUNIT", None, "RADIAN"),
+    ])
+
+    project  = ifc.createIfcProject(_uid(), owner, "Mekan IFC", None, None, None, None, None, units)
+    site     = ifc.createIfcSite(_uid(), owner, "Site", None, None,
+                                 _placement(ifc, None), None, None, "ELEMENT", None)
+    building = ifc.createIfcBuilding(_uid(), owner, "Bina", None, None,
+                                     _placement(ifc, site.ObjectPlacement),
+                                     None, None, "ELEMENT", None, None, None)
+    storey   = ifc.createIfcBuildingStorey(_uid(), owner, "Zemin Kat", None, None,
+                                     _placement(ifc, building.ObjectPlacement),
+                                     None, None, "ELEMENT", 0.0)
+
+    ifc.createIfcRelAggregates(_uid(), owner, None, None, project,  [site])
+    ifc.createIfcRelAggregates(_uid(), owner, None, None, site,     [building])
+    ifc.createIfcRelAggregates(_uid(), owner, None, None, building, [storey])
+
+    spaces = []
+    MM_TO_M = 0.001
+
+    for idx, room in enumerate(rooms_raw):
+        pts_mm  = room["points"]
+        pts_off = _offset_polygon(pts_mm, wall_offset_mm)
+        pts_m   = [[p[0]*MM_TO_M, p[1]*MM_TO_M] for p in pts_off]
+
+        r_name = room.get("name") or f"Mekan {idx+1}"
+        r_num  = room.get("number") or str(idx+1)
+
+        poly_pts = [_cp2(ifc, p[0], p[1]) for p in pts_m]
+        poly_pts.append(poly_pts[0])
+        profile = ifc.createIfcArbitraryClosedProfileDef(
+            "AREA", None, ifc.createIfcPolyline(poly_pts))
+        solid = ifc.createIfcExtrudedAreaSolid(
+            profile, _ax3(ifc, _cp3(ifc, 0, 0, 0)),
+            _dir3(ifc, 0, 0, 1), float(room_height_m))
+        shape = ifc.createIfcProductDefinitionShape(None, None, [
+            ifc.createIfcShapeRepresentation(body, "Body", "SweptSolid", [solid])])
+
+        space = ifc.createIfcSpace(
+            _uid(), owner,
+            r_name, r_num, None,
+            _placement(ifc, storey.ObjectPlacement),
+            shape, None, "ELEMENT", "INTERNAL")
+
+        # Pset_SpaceCommon
+        pset_props = [
+            ifc.createIfcPropertySingleValue("NetFloorArea", None,
+                ifc.createIfcReal(round(room["area_m2"], 3)), None),
+            ifc.createIfcPropertySingleValue("MahalAdi", None,
+                ifc.createIfcLabel(r_name), None),
+            ifc.createIfcPropertySingleValue("MahalNo", None,
+                ifc.createIfcLabel(r_num), None),
+            ifc.createIfcPropertySingleValue("WallOffsetMM", None,
+                ifc.createIfcReal(float(wall_offset_mm)), None),
+        ]
+        pset = ifc.createIfcPropertySet(_uid(), owner, "Pset_SpaceCommon", None, pset_props)
+        ifc.createIfcRelDefinesByProperties(_uid(), owner, None, None, [space], pset)
+
+        spaces.append(space)
+
+    if spaces:
+        ifc.createIfcRelContainedInSpatialStructure(
+            _uid(), owner, None, None, spaces, storey)
+
+    ifc.write(output_path)
+
+    named   = sum(1 for r in rooms_raw if r.get("name"))
+    unnamed = len(rooms_raw) - named
+
+    return json.dumps({
+        "mekan_sayisi":   len(spaces),
+        "isimli":         named,
+        "isimsiz":        unnamed,
+        "wall_offset_mm": wall_offset_mm,
+        "room_height_m":  room_height_m,
+        "output":         output_path,
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 def clean_lighting(dxf_path: str, output_path: str = "") -> str:
     """
     ADIM 1 — Aydınlatma temizleme.
