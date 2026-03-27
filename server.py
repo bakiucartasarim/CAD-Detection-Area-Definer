@@ -391,24 +391,42 @@ def match_rooms_to_polygons(dxf_path: str) -> str:
     uf          = data["unit_factor"]   # m²/birim²  (ör: 1e-6 for mm)
     ls          = _math.sqrt(uf)        # sadece alan hesabı için
     wall_layers = {n for n, t in layer_types.items() if t == "walls"}
+    # AI_MAHAL: kullanıcının manuel çizdiği + algoritmik polygon'lar
+    AI_MAHAL_LAYER = "AI_MAHAL"
 
     # ── 2. Kapalı polygon'ları topla (ham DXF birimleri) ───────────────────
+    def _is_closed_poly(ent):
+        if ent.get("closed"):
+            return True
+        # Geometrik kapalılık: ilk ve son nokta 50mm'den yakınsa kapalı say
+        pts = ent.get("points", [])
+        if len(pts) >= 3:
+            import math as _m
+            gap = _m.hypot(pts[-1][0]-pts[0][0], pts[-1][1]-pts[0][1])
+            if gap < 50:
+                return True
+        return False
+
     polygons = []
     for ent in data["entities"]:
-        if ent["type"] != "LWPOLYLINE" or not ent.get("closed"):
+        if ent["type"] != "LWPOLYLINE" or not _is_closed_poly(ent):
             continue
-        if ent["layer"] not in wall_layers:
+        layer = ent["layer"]
+        # Duvar layer'ları VEYA AI_MAHAL (manuel çizimler)
+        if layer not in wall_layers and layer != AI_MAHAL_LAYER:
             continue
-        pts = ent.get("points", [])          # ham DXF koordinatları
+        pts = ent.get("points", [])
         if len(pts) < 3:
             continue
         area_m2 = _polygon_area([[p[0]*ls, p[1]*ls] for p in pts])
-        if area_m2 < 0.5 or area_m2 > MAX_AREA_M2:
+        # AI_MAHAL polygon'ları için alan filtresini genişlet (HOL gibi büyük alanlar)
+        max_area = 1000.0 if layer == AI_MAHAL_LAYER else MAX_AREA_M2
+        if area_m2 < 0.5 or area_m2 > max_area:
             continue
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
         polygons.append({"pts": pts, "cx": cx, "cy": cy, "area_m2": area_m2,
-                         "layer": ent["layer"]})
+                         "layer": layer})
 
     # ── 3. MAHAL blok bilgilerini oku (ham DXF birimleri) ──────────────────
     def _parse_area(raw: str) -> float:
@@ -539,6 +557,73 @@ def match_rooms_to_polygons(dxf_path: str) -> str:
 
 
 @mcp.tool()
+def request_manual_polygons(dxf_path: str) -> str:
+    """
+    İŞARETLEME ADIM 3.5 — Tanımlanamayan mekanlar için kullanıcıdan manuel polygon ister.
+    match_rooms_to_polygons() sonrasında, draw_room_markers() öncesinde çalıştırılır.
+
+    1. Polygon bulunamayan odaları listeler
+    2. GstarCAD'de AI_MAHAL layer'ını oluşturur ve aktif yapar
+    3. Kullanıcıdan AI_MAHAL layer'ına kapalı LWPOLYLINE çizmesini ister
+
+    Args:
+        dxf_path: Temizlenmiş DXF dosyasının tam yolu
+    """
+    import win32com.client, json as _json
+    import time as _time
+
+    matched = _json.loads(match_rooms_to_polygons(dxf_path))
+    unmatched = [r for r in matched["rooms"] if r["status"] == "unmatched"]
+
+    if not unmatched:
+        return _json.dumps({
+            "mesaj": "Tüm mekanlar tespit edildi, manuel polygon gerekmiyor.",
+            "unmatched": 0
+        }, ensure_ascii=False, indent=2)
+
+    # GstarCAD bağlantısı
+    for attempt in range(3):
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+            msp  = doc.ModelSpace
+            _ = msp.Count
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            _time.sleep(3)
+
+    # AI_MAHAL layer'ını oluştur ve aktif yap
+    AI_LAYER = "AI_MAHAL"
+    try:
+        ly = doc.Layers.Add(AI_LAYER)
+    except Exception:
+        ly = doc.Layers.Item(AI_LAYER)
+    ly.Color = 4  # cyan
+    doc.ActiveLayer = ly
+
+    oda_listesi = [
+        {"number": r["number"], "name": r["name"], "area_m2": r["area_m2"],
+         "cx": r["cx"], "cy": r["cy"]}
+        for r in unmatched
+    ]
+
+    result = {
+        "unmatched_count": len(unmatched),
+        "talimat": (
+            f"GstarCAD'de {len(unmatched)} mekan kırmızı daire ile işaretlendi. "
+            f"AI_MAHAL layer'ı aktif yapıldı (cyan). "
+            f"Lütfen her kırmızı daireli mekan için AI_MAHAL layer'ına kapalı LWPOLYLINE çizin, "
+            f"sonra draw_room_markers() çalıştırın."
+        ),
+        "eksik_odalar": oda_listesi,
+        "sonraki_adim": "Polygon çizimi sonrası draw_room_markers() çalıştırın"
+    }
+    return _json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 def draw_room_markers(dxf_path: str) -> str:
     """
     İŞARETLEME ADIM 3 — GstarCAD'de hatch + metin etiketi çiz.
@@ -575,8 +660,9 @@ def draw_room_markers(dxf_path: str) -> str:
     LAYER_BLUE   = "MAHAL-MAVI"
     LAYER_RED    = "MAHAL-KIRMIZI"
     LABEL_LAYER  = "MAHAL-ETIKET"
+    AI_MAHAL     = "AI_MAHAL"
 
-    # Eski işaretleme layer'larını temizle
+    # Eski işaretleme layer'larını temizle (AI_MAHAL korunur — kullanıcı çizimleri)
     for ln in [LAYER_GREEN, LAYER_BLUE, LAYER_RED, LABEL_LAYER,
                "DUVAR-HATCH", "MAHAL-TANIMLI", "MAHAL-TANIMSIZ"]:
         try:
@@ -584,8 +670,9 @@ def draw_room_markers(dxf_path: str) -> str:
         except Exception:
             pass
 
-    # Layer'ları oluştur
-    for lname, lcolor in [(LAYER_GREEN, 3), (LAYER_BLUE, 5), (LAYER_RED, 1), (LABEL_LAYER, 7)]:
+    # Layer'ları oluştur — AI_MAHAL: kullanıcı manuel polygon layer'ı (cyan, 4)
+    for lname, lcolor in [(LAYER_GREEN, 3), (LAYER_BLUE, 5), (LAYER_RED, 1),
+                          (LABEL_LAYER, 7), (AI_MAHAL, 4)]:
         try:
             ly = doc.Layers.Add(lname)
         except Exception:
@@ -643,7 +730,7 @@ def draw_room_markers(dxf_path: str) -> str:
 
                     # Metin yüksekliği: oda yüksekliğinin %8'i
                     # DXF birimleri mm → oda 4000mm ise txt_h=320mm (uygun)
-                    txt_h = max(min(h_span * 0.08, 1500), 150)
+                    txt_h = max(min(h_span * 0.006, 75), 15)
 
                     # Üst bölge: max_y'den %20 aşağı
                     ty = max_y - h_span * 0.20
@@ -667,18 +754,13 @@ def draw_room_markers(dxf_path: str) -> str:
                     pass
 
         elif status == "unmatched":
-            # Polygon yok — daire + metin marker
+            # Polygon yok — MAHAL bloğu merkezinde küçük kırmızı daire
             try:
-                r_circ = 500.0
+                r_circ = 150.0
                 pt = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [cx, cy, 0.0])
                 circ = msp.AddCircle(pt, r_circ)
                 circ.Layer = LAYER_RED
                 circ.Color = 1
-
-                tp = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [cx, cy + r_circ * 0.3, 0.0])
-                txt = msp.AddText(f"{name} (TANIMSIZ)", tp, r_circ * 0.4)
-                txt.Layer = LAYER_RED
-                txt.Color = 1
                 red += 1
             except Exception:
                 pass
