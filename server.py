@@ -1541,6 +1541,104 @@ def open_luminaire_picker(
             except Exception:
                 pass
 
+        # Oda → çizilen armatür entity listesi  {room_id: [ent, ent, ...]}
+        placed_ents = {}
+
+        def _in_poly_local(px, py, pts):
+            inside, j = False, len(pts) - 1
+            for i in range(len(pts)):
+                xi, yi = pts[i]; xj, yj = pts[j]
+                if ((yi > py) != (yj > py)) and (px < (xj-xi)*(py-yi)/(yj-yi+1e-12)+xi):
+                    inside = not inside
+                j = i
+            return inside
+
+        def _erase_placed(room_id):
+            for ent in placed_ents.get(room_id, []):
+                try:
+                    ent.Delete()
+                except Exception:
+                    pass
+            placed_ents[room_id] = []
+
+        def _place_luminaires(room, lum_name, block_mm=600):
+            """Odaya 600×600mm kare grid yerleşimi çiz."""
+            if not doc:
+                return 0, "GstarCAD bağlantısı yok"
+            room_id = room["id"]
+            _erase_placed(room_id)
+
+            pts = room["points"]
+            xs  = [p[0] for p in pts]
+            ys  = [p[1] for p in pts]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            w = max_x - min_x
+            h = max_y - min_y
+
+            n_x  = max(1, round(w / 1500))
+            n_y  = max(1, round(h / 1500))
+            sp_x = w / n_x
+            sp_y = h / n_y
+            half = block_mm / 2
+
+            ARM_LAYER = "ARMATÜR"
+            try:
+                cur_msp = doc.ActiveDocument.ModelSpace if hasattr(doc, 'ActiveDocument') else msp
+            except Exception:
+                cur_msp = msp
+
+            try:
+                al = cur_msp.Document.Layers.Add(ARM_LAYER)
+                al.Color = 3
+            except Exception:
+                try:
+                    doc.Layers.Add(ARM_LAYER).Color = 3
+                except Exception:
+                    pass
+
+            placed = []
+            errors = []
+            for i in range(n_x):
+                for j in range(n_y):
+                    cx = min_x + sp_x * (i + 0.5)
+                    cy = min_y + sp_y * (j + 0.5)
+                    if not _in_poly_local(cx, cy, pts):
+                        continue
+                    try:
+                        flat = [cx-half, cy-half,
+                                cx+half, cy-half,
+                                cx+half, cy+half,
+                                cx-half, cy+half]
+                        pts_var = win32com.client.VARIANT(
+                            pythoncom.VT_ARRAY | pythoncom.VT_R8, flat)
+                        sq = msp.AddLightWeightPolyline(pts_var)
+                        sq.Closed     = True
+                        sq.Layer      = ARM_LAYER
+                        sq.Color      = 3
+                        sq.LineWeight = 25
+                        placed.append(sq)
+                    except Exception as e:
+                        errors.append(str(e))
+
+            # Armatür adı etiketi
+            try:
+                cx_c  = (min_x + max_x) / 2
+                cy_c  = (min_y + max_y) / 2
+                tp    = win32com.client.VARIANT(
+                    pythoncom.VT_ARRAY | pythoncom.VT_R8, [cx_c, cy_c, 0.0])
+                txt_h = max(min(w * 0.03, 100), 25)
+                t = msp.AddText(lum_name, tp, txt_h)
+                t.Layer = ARM_LAYER
+                t.Color = 3
+                placed.append(t)
+            except Exception as e:
+                errors.append(f"text:{e}")
+
+            placed_ents[room_id] = placed
+            err_str = (" | HATA: " + errors[0]) if errors else ""
+            return len(placed), err_str
+
         # ── Tkinter penceresi ─────────────────────────────────────────────
         root = tk.Tk()
         root.title("Mekan Armatür Atama")
@@ -1679,7 +1777,9 @@ def open_luminaire_picker(
             assignments[rid] = {"name": r_name, "number": r_num, "luminaire": lum}
             assigned_lbl.config(text=f"Atanan: {len(assignments)}")
             prefix = f"{r_num} · " if r_num else ""
-            status_var.set(f"✓  {prefix}{r_name}  →  {lum}")
+            # Armatür yerleştir
+            count, err = _place_luminaires(room, lum)
+            status_var.set(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
             # Listede vurgula
             room_lb.itemconfig(sel_r[0], fg="#00ff88")
 
@@ -1688,6 +1788,7 @@ def open_luminaire_picker(
 
         def _on_close():
             _erase_border(hover_ent[0])
+            # Yerleştirilen armatürleri KORU — sadece border silinir
             root.destroy()
 
         root.protocol("WM_DELETE_WINDOW", _on_close)
