@@ -351,7 +351,346 @@ def identify_rooms(dxf_path: str) -> str:
     result = {
         "toplam": len(rooms),
         "rooms": rooms,
-        "sonraki_adim": "colorize_rooms_in_cad() ile mekanları renklendir"
+        "sonraki_adim": "match_rooms_to_polygons() ile polygon eşleştirmesi yapın"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def match_rooms_to_polygons(dxf_path: str) -> str:
+    """
+    İŞARETLEME ADIM 2 — Her MAHAL bloğunu en yakın kapalı polygon'a eşleştir.
+    identify_rooms() sonrasında çalıştırılır.
+
+    Duvar layer'larındaki kapalı LWPOLYLINE'ları tarar, her birini
+    içinde ya da en yakınında olan MAHAL bloğuyla eşleştirir.
+
+    Args:
+        dxf_path: Temizlenmiş DXF dosyasının tam yolu
+    Returns:
+        JSON: matched_rooms listesi [{id, name, number, area_m2, points, cx, cy, status}]
+        status: 'named' | 'unnamed' | 'unmatched'
+    """
+    import ezdxf as _ezdxf
+    import math as _math
+
+    from parsers.dxf_parser import parse_dxf
+    from parsers.element_classifier import classify_all_layers
+    from tools.ifc_exporter import _polygon_area
+
+    MAX_AREA_M2 = 200.0
+
+    # ── 1. DXF oku — ham koordinatlar (ölçeksiz, GstarCAD birimleri) ─────────
+    try:
+        doc_enc = _ezdxf.readfile(dxf_path, encoding="utf-8")
+    except Exception:
+        doc_enc = _ezdxf.readfile(dxf_path)
+
+    data        = parse_dxf(dxf_path)
+    layer_types = classify_all_layers(data["layers"])
+    uf          = data["unit_factor"]   # m²/birim²  (ör: 1e-6 for mm)
+    ls          = _math.sqrt(uf)        # sadece alan hesabı için
+    wall_layers = {n for n, t in layer_types.items() if t == "walls"}
+
+    # ── 2. Kapalı polygon'ları topla (ham DXF birimleri) ───────────────────
+    polygons = []
+    for ent in data["entities"]:
+        if ent["type"] != "LWPOLYLINE" or not ent.get("closed"):
+            continue
+        if ent["layer"] not in wall_layers:
+            continue
+        pts = ent.get("points", [])          # ham DXF koordinatları
+        if len(pts) < 3:
+            continue
+        area_m2 = _polygon_area([[p[0]*ls, p[1]*ls] for p in pts])
+        if area_m2 < 0.5 or area_m2 > MAX_AREA_M2:
+            continue
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        polygons.append({"pts": pts, "cx": cx, "cy": cy, "area_m2": area_m2,
+                         "layer": ent["layer"]})
+
+    # ── 3. MAHAL blok bilgilerini oku (ham DXF birimleri) ──────────────────
+    def _parse_area(raw: str) -> float:
+        try:
+            return float(raw.replace(",", ".").replace("m2", "").replace("m²", "").strip())
+        except Exception:
+            return 0.0
+
+    labels = []
+    for e in doc_enc.modelspace():
+        if e.dxftype() != "INSERT":
+            continue
+        layer = e.dxf.layer.upper()
+        bname = e.dxf.name.upper()
+        if not ("MAHAL" in layer or "MAHAL" in bname or "0ASM" in layer):
+            continue
+        if not hasattr(e, "attribs") or not e.attribs:
+            continue
+        attrs = {a.dxf.tag.upper(): a.dxf.text for a in e.attribs}
+        name     = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or attrs.get("MAHAL") or "").strip()
+        number   = (attrs.get("ROOMOBJECTS:NUMBER") or attrs.get("NUMBER") or attrs.get("MAHALNO") or "").strip()
+        area_raw = attrs.get("ALAN:NAME") or attrs.get("ALAN") or attrs.get("AREA") or "0"
+        lx = e.dxf.insert.x
+        ly = e.dxf.insert.y
+        labels.append({"name": name, "number": number, "area_m2": _parse_area(area_raw), "x": lx, "y": ly})
+
+    # Deduplication: aynı odanın SIVAA+duvar+0ASM-DUVAR polygon'larını birleştir
+    # Merkezi 10mm'den yakın olanlar aynı odanın farklı layer versiyonu — en büyüğünü tut
+    dedup = []
+    used_idx = set()
+    for i, p in enumerate(polygons):
+        if i in used_idx:
+            continue
+        group = [i]
+        for j, q in enumerate(polygons):
+            if j <= i or j in used_idx:
+                continue
+            if _math.hypot(p["cx"] - q["cx"], p["cy"] - q["cy"]) < 10:
+                group.append(j)
+        best = max(group, key=lambda k: polygons[k]["area_m2"])
+        dedup.append(polygons[best])
+        used_idx.update(group)
+    polygons = dedup
+
+    # ── 4. Eşleştir: polygon→label (greedy, en yakın label) ──────────────
+    def _pt_in_poly(px, py, pts):
+        inside = False
+        n = len(pts)
+        j = n - 1
+        for i in range(n):
+            xi, yi = pts[i]
+            xj, yj = pts[j]
+            if ((yi > py) != (yj > py)) and (px < (xj-xi)*(py-yi)/(yj-yi+1e-12) + xi):
+                inside = not inside
+            j = i
+        return inside
+
+    matched_rooms = []
+    used_labels   = set()
+
+    for poly in polygons:
+        # Önce polygon içindeki label'ları dene
+        inside = [i for i, lbl in enumerate(labels)
+                  if i not in used_labels and _pt_in_poly(lbl["x"], lbl["y"], poly["pts"])]
+
+        if inside:
+            best_i = min(inside, key=lambda i: _math.hypot(
+                labels[i]["x"] - poly["cx"], labels[i]["y"] - poly["cy"]))
+        else:
+            thresh = (_math.sqrt(poly["area_m2"]) * 2.0 + 1.0) / ls
+            cands  = [(i, _math.hypot(lbl["x"]-poly["cx"], lbl["y"]-poly["cy"]))
+                      for i, lbl in enumerate(labels) if i not in used_labels]
+            cands  = [(i, d) for i, d in cands if d <= thresh]
+            best_i = min(cands, key=lambda x: x[1])[0] if cands else -1
+
+        if best_i >= 0:
+            lbl = labels[best_i]
+            used_labels.add(best_i)
+            matched_rooms.append({
+                "id":      len(matched_rooms),
+                "name":    lbl["name"],
+                "number":  lbl["number"],
+                "area_m2": lbl["area_m2"],
+                "cx":      round(poly["cx"], 1),
+                "cy":      round(poly["cy"], 1),
+                "points":  [[round(p[0], 1), round(p[1], 1)] for p in poly["pts"]],
+                "status":  "named" if (lbl["name"] or lbl["number"]) else "unnamed",
+            })
+        else:
+            matched_rooms.append({
+                "id":      len(matched_rooms),
+                "name":    "",
+                "number":  "",
+                "area_m2": round(poly["area_m2"], 2),
+                "cx":      round(poly["cx"], 1),
+                "cy":      round(poly["cy"], 1),
+                "points":  [[round(p[0], 1), round(p[1], 1)] for p in poly["pts"]],
+                "status":  "unnamed",
+            })
+
+    # Eşleşemeyen label'lar (kırmızı)
+    for i, lbl in enumerate(labels):
+        if i not in used_labels and lbl["name"]:
+            matched_rooms.append({
+                "id":      len(matched_rooms),
+                "name":    lbl["name"],
+                "number":  lbl["number"],
+                "area_m2": lbl["area_m2"],
+                "cx":      round(lbl["x"], 1),
+                "cy":      round(lbl["y"], 1),
+                "points":  [],
+                "status":  "unmatched",
+            })
+
+    named    = sum(1 for r in matched_rooms if r["status"] == "named")
+    unnamed  = sum(1 for r in matched_rooms if r["status"] == "unnamed")
+    unmatched = sum(1 for r in matched_rooms if r["status"] == "unmatched")
+
+    result = {
+        "named":     named,
+        "unnamed":   unnamed,
+        "unmatched": unmatched,
+        "toplam":    len(matched_rooms),
+        "rooms":     matched_rooms,
+        "sonraki_adim": "draw_room_markers() ile GstarCAD'e hatch + etiket çizin",
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def draw_room_markers(dxf_path: str) -> str:
+    """
+    İŞARETLEME ADIM 3 — GstarCAD'de hatch + metin etiketi çiz.
+    match_rooms_to_polygons() verilerini kullanarak aktif çizime uygular.
+
+      Yeşil  (MAHAL-YESIL,   color 3) → İsim tanımlı alan + etiket
+      Mavi   (MAHAL-MAVI,    color 5) → İsimsiz alan
+      Kırmızı(MAHAL-KIRMIZI, color 1) → Tanımsız (polygon yok) → daire + metin
+
+    Args:
+        dxf_path: Temizlenmiş DXF dosyasının tam yolu
+    """
+    import win32com.client, pythoncom, math as _math, json as _json
+
+    # ADIM 2 verisini al
+    matched = _json.loads(match_rooms_to_polygons(dxf_path))
+    rooms   = matched["rooms"]
+
+    # GstarCAD bağlantısı
+    import time as _time
+    for attempt in range(3):
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+            msp  = doc.ModelSpace
+            _ = msp.Count
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            _time.sleep(3)
+
+    LAYER_GREEN  = "MAHAL-YESIL"
+    LAYER_BLUE   = "MAHAL-MAVI"
+    LAYER_RED    = "MAHAL-KIRMIZI"
+    LABEL_LAYER  = "MAHAL-ETIKET"
+
+    # Eski işaretleme layer'larını temizle
+    for ln in [LAYER_GREEN, LAYER_BLUE, LAYER_RED, LABEL_LAYER,
+               "DUVAR-HATCH", "MAHAL-TANIMLI", "MAHAL-TANIMSIZ"]:
+        try:
+            doc.SendCommand(f'(command "._ERASE" (ssget "X" (list (cons 8 "{ln}"))) "")\n')
+        except Exception:
+            pass
+
+    # Layer'ları oluştur
+    for lname, lcolor in [(LAYER_GREEN, 3), (LAYER_BLUE, 5), (LAYER_RED, 1), (LABEL_LAYER, 7)]:
+        try:
+            ly = doc.Layers.Add(lname)
+        except Exception:
+            ly = doc.Layers.Item(lname)
+        ly.Color = lcolor
+
+    green = blue = red = 0
+
+    for room in rooms:
+        pts    = room.get("points", [])
+        status = room["status"]
+        name   = room["name"]
+        number = room["number"]
+        area   = room["area_m2"]
+        cx, cy = room["cx"], room["cy"]
+
+        if status in ("named", "unnamed") and len(pts) >= 3:
+            layer = LAYER_GREEN if status == "named" else LAYER_BLUE
+            color = 3           if status == "named" else 5
+            try:
+                flat = []
+                for p in pts:
+                    flat.extend([p[0], p[1]])
+                coords_var = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, flat)
+                tmp_poly = msp.AddLightWeightPolyline(coords_var)
+                tmp_poly.Closed = True
+                tmp_poly.Layer  = layer
+
+                outer = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, [tmp_poly])
+                h = msp.AddHatch(0, "SOLID", True)
+                h.Layer = layer
+                h.Color = color
+                h.AppendOuterLoop(outer)
+                h.Evaluate()
+                tmp_poly.Delete()
+
+                if status == "named":
+                    green += 1
+                else:
+                    blue += 1
+            except Exception:
+                pass
+
+            # Metin etiketi: no + isim + alan — polygon üst bölgesine yerleştir
+            if status == "named" and name:
+                try:
+                    # Polygon bounding box (DXF birimleri = mm)
+                    all_x = [p[0] for p in pts]
+                    all_y = [p[1] for p in pts]
+                    min_x, max_x = min(all_x), max(all_x)
+                    min_y, max_y = min(all_y), max(all_y)
+                    w_span = max_x - min_x
+                    h_span = max_y - min_y
+                    mid_x  = (min_x + max_x) / 2.0
+
+                    # Metin yüksekliği: oda yüksekliğinin %8'i
+                    # DXF birimleri mm → oda 4000mm ise txt_h=320mm (uygun)
+                    txt_h = max(min(h_span * 0.08, 1500), 150)
+
+                    # Üst bölge: max_y'den %20 aşağı
+                    ty = max_y - h_span * 0.20
+
+                    # MTEXT — sol kenar = mid_x - w_span/2, genişlik = w_span
+                    insert1 = win32com.client.VARIANT(
+                        pythoncom.VT_ARRAY | pythoncom.VT_R8, [min_x, ty, 0.0])
+                    mt1 = msp.AddMText(insert1, w_span,
+                                       f"\\A1;{number}  {name}" if number else f"\\A1;{name}")
+                    mt1.Layer  = LABEL_LAYER
+                    mt1.Color  = 7
+                    mt1.Height = txt_h
+
+                    insert2 = win32com.client.VARIANT(
+                        pythoncom.VT_ARRAY | pythoncom.VT_R8, [min_x, ty - txt_h * 1.6, 0.0])
+                    mt2 = msp.AddMText(insert2, w_span, f"\\A1;{area} m\u00b2")
+                    mt2.Layer  = LABEL_LAYER
+                    mt2.Color  = 7
+                    mt2.Height = txt_h * 0.75
+                except Exception:
+                    pass
+
+        elif status == "unmatched":
+            # Polygon yok — daire + metin marker
+            try:
+                r_circ = 500.0
+                pt = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [cx, cy, 0.0])
+                circ = msp.AddCircle(pt, r_circ)
+                circ.Layer = LAYER_RED
+                circ.Color = 1
+
+                tp = win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [cx, cy + r_circ * 0.3, 0.0])
+                txt = msp.AddText(f"{name} (TANIMSIZ)", tp, r_circ * 0.4)
+                txt.Layer = LAYER_RED
+                txt.Color = 1
+                red += 1
+            except Exception:
+                pass
+
+    doc.Regen(1)
+
+    result = {
+        "yesil":     green,
+        "mavi":      blue,
+        "kirmizi":   red,
+        "summary":   f"{green} yeşil (isim+etiket), {blue} mavi (isimsiz), {red} kırmızı (tanımsız)",
+        "sonraki_adim": "export_room_report() ile mekan listesini dışa aktarın",
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
