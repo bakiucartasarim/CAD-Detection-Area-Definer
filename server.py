@@ -805,19 +805,20 @@ def colorize_rooms_in_cad(dxf_path: str) -> str:
 def export_rooms_ifc(
     dxf_path: str,
     output_path: str = "",
-    wall_offset_mm: float = 15.0,
-    room_height_m: float = 3.0,
+    wall_thickness_mm: float = 150.0,
+    room_height_m: float = 2.8,
 ) -> str:
     """
     İŞARETLEME ADIM 4 — Eşleşen mekanları IFC dosyasına aktar.
-    match_rooms_to_polygons() verilerini kullanarak her mekan için IfcSpace oluşturur.
-    Her polygon wall_offset_mm kadar dışarıya genişletilir (duvar kalınlığı payı).
+    match_rooms_to_polygons() verilerini kullanarak her mekan için
+    IfcSpace + IfcWall oluşturur. Polygon wall_thickness_mm kadar
+    dışarıya genişletilir (iç → dış ölçü dönüşümü).
 
     Args:
-        dxf_path      : Temizlenmiş DXF dosyasının tam yolu
-        output_path   : Çıktı IFC yolu (boş bırakılırsa _MEKAN.ifc olarak kaydeder)
-        wall_offset_mm: Dışa offset mm cinsinden (varsayılan: 15.0)
-        room_height_m : Mekan yüksekliği metre cinsinden (varsayılan: 3.0)
+        dxf_path          : Temizlenmiş DXF dosyasının tam yolu
+        output_path       : Çıktı IFC yolu (boş bırakılırsa _MEKAN.ifc olarak kaydeder)
+        wall_thickness_mm : Duvar kalınlığı mm cinsinden (varsayılan: 150.0 = 15cm)
+        room_height_m     : Kat yüksekliği metre cinsinden (varsayılan: 2.8)
     """
     import math as _m, json as _json, uuid as _uuid, time as _time
     import ifcopenshell
@@ -825,6 +826,8 @@ def export_rooms_ifc(
     if not output_path:
         base = os.path.splitext(dxf_path)[0]
         output_path = base + "_MEKAN.ifc"
+
+    wall_offset_mm = wall_thickness_mm  # alias for clarity
 
     # ── 1. Eşleşmiş mekanları al ─────────────────────────────────────────────
     data = _json.loads(match_rooms_to_polygons(dxf_path))
@@ -933,6 +936,7 @@ def export_rooms_ifc(
     ifc.createIfcRelAggregates(_uid(), owner, None, None, building, [storey])
 
     spaces = []
+    walls  = []
     MM_TO_M = 0.001
 
     for idx, room in enumerate(rooms_raw):
@@ -975,9 +979,43 @@ def export_rooms_ifc(
 
         spaces.append(space)
 
+        # ── IfcWall: her kenar için ───────────────────────────────────────────
+        wall_t_m = wall_thickness_mm * MM_TO_M
+        n = len(pts_m)
+        for j in range(n):
+            p1 = pts_m[j]
+            p2 = pts_m[(j + 1) % n]
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            length = _m.hypot(dx, dy)
+            if length < 0.01:
+                continue
+            angle = _m.atan2(dy, dx)
+            w_profile = ifc.createIfcRectangleProfileDef(
+                "AREA", None,
+                ifc.createIfcAxis2Placement2D(_cp2(ifc, length / 2, wall_t_m / 2), None),
+                float(length), float(wall_t_m))
+            w_solid = ifc.createIfcExtrudedAreaSolid(
+                w_profile, _ax3(ifc, _cp3(ifc, 0, 0, 0)),
+                _dir3(ifc, 0, 0, 1), float(room_height_m))
+            w_shape = ifc.createIfcProductDefinitionShape(None, None, [
+                ifc.createIfcShapeRepresentation(body, "Body", "SweptSolid", [w_solid])])
+            wall = ifc.createIfcWall(
+                _uid(), owner, f"Wall_R{idx}_S{j}", None, None,
+                ifc.createIfcLocalPlacement(
+                    storey.ObjectPlacement,
+                    _ax3(ifc, _cp3(ifc, p1[0], p1[1], 0.),
+                         _dir3(ifc, 0, 0, 1),
+                         _dir3(ifc, _m.cos(angle), _m.sin(angle), 0.))),
+                w_shape, None, "SOLIDWALL")
+            walls.append(wall)
+
     if spaces:
         ifc.createIfcRelContainedInSpatialStructure(
             _uid(), owner, None, None, spaces, storey)
+    if walls:
+        ifc.createIfcRelContainedInSpatialStructure(
+            _uid(), owner, None, None, walls, storey)
 
     ifc.write(output_path)
 
@@ -985,13 +1023,415 @@ def export_rooms_ifc(
     unnamed = len(rooms_raw) - named
 
     return json.dumps({
-        "mekan_sayisi":   len(spaces),
-        "isimli":         named,
-        "isimsiz":        unnamed,
-        "wall_offset_mm": wall_offset_mm,
-        "room_height_m":  room_height_m,
-        "output":         output_path,
+        "mekan_sayisi":       len(spaces),
+        "duvar_sayisi":       len(walls),
+        "isimli":             named,
+        "isimsiz":            unnamed,
+        "wall_thickness_mm":  wall_thickness_mm,
+        "room_height_m":      room_height_m,
+        "output":             output_path,
     }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
+    """
+    Fare imleci GstarCAD'de hangi mekanın üzerindeyse tooltip gösterir.
+    Arka planda çalışır (thread), duration_sec sonra otomatik kapanır.
+
+    Args:
+        dxf_path    : Temizlenmiş DXF dosyasının tam yolu
+        duration_sec: Kaç saniye çalışacak (varsayılan: 60)
+    """
+    import threading, time as _time, json as _json, math as _math
+    import ctypes, ctypes.wintypes
+    import win32api, win32gui
+    import win32com.client
+
+    # ── Mekan verilerini önceden yükle ───────────────────────────────────────
+    matched   = _json.loads(match_rooms_to_polygons(dxf_path))
+    rooms     = [r for r in matched["rooms"] if r["points"]]
+
+    def _in_poly(px, py, pts):
+        inside, j = False, len(pts) - 1
+        for i in range(len(pts)):
+            xi, yi = pts[i]; xj, yj = pts[j]
+            if ((yi > py) != (yj > py)) and (px < (xj-xi)*(py-yi)/(yj-yi+1e-12)+xi):
+                inside = not inside
+            j = i
+        return inside
+
+    def _get_draw_coords(acad_doc):
+        sx, sy = win32api.GetCursorPos()
+        hwnd = win32gui.GetForegroundWindow()
+        rect  = win32gui.GetClientRect(hwnd)
+        win_w = max(rect[2] - rect[0], 1)
+        win_h = max(rect[3] - rect[1], 1)
+        pt = ctypes.wintypes.POINT(0, 0)
+        ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        rel_x = (sx - pt.x) / win_w
+        rel_y = (sy - pt.y) / win_h
+        vp    = acad_doc.ActiveViewport
+        vp_cx, vp_cy = vp.Center[0], vp.Center[1]
+        vp_h  = vp.Height
+        vp_w  = vp_h * (win_w / win_h)
+        dx = vp_cx + (rel_x - 0.5) * vp_w
+        dy = vp_cy - (rel_y - 0.5) * vp_h
+        return dx, dy, sx, sy
+
+    def _run():
+        import tkinter as tk
+        import pythoncom
+        pythoncom.CoInitialize()   # COM thread-safe init
+
+        # GstarCAD bağlantısı
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+        except Exception:
+            return
+
+        LUMINAIRES   = ["Flat-G", "Lightline 043", "Snow 019"]
+        HOTKEYS      = [ord('1'), ord('2'), ord('3')]   # VK codes
+        room_assignments = {}   # room_id → seçilen armatür
+        key_was_down = [False, False, False]            # debounce
+
+        # ── Tooltip penceresi ─────────────────────────────────────────────────
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.attributes("-alpha", 0.95)
+        root.configure(bg="#1a1a2e")
+        root.resizable(False, False)
+
+        # Mekan adı satırı
+        lbl = tk.Label(
+            root, text="", bg="#1a1a2e", fg="#00e5ff",
+            font=("Segoe UI", 10, "bold"),
+            padx=12, pady=5, anchor="w"
+        )
+        lbl.pack(fill="x")
+
+        # Ayraç
+        tk.Frame(root, bg="#00e5ff", height=1).pack(fill="x", padx=6)
+
+        # Armatür seçim satırı  → [1] Flat-G  [2] Lightline 043  [3] Snow 019
+        option_frame = tk.Frame(root, bg="#1a1a2e")
+        option_frame.pack(fill="x", padx=6, pady=5)
+
+        opt_labels = []
+        for i, name in enumerate(LUMINAIRES):
+            frm = tk.Frame(option_frame, bg="#1a1a2e")
+            frm.pack(side="left", padx=4)
+            num_lbl = tk.Label(frm, text=f"[{i+1}]", bg="#1a1a2e",
+                               fg="#ffb300", font=("Segoe UI", 8, "bold"))
+            num_lbl.pack(side="left")
+            name_lbl = tk.Label(frm, text=f" {name} ", bg="#1a1a2e",
+                                fg="#b0bec5", font=("Segoe UI", 9))
+            name_lbl.pack(side="left")
+            opt_labels.append((frm, num_lbl, name_lbl))
+
+        current_room = [None]
+
+        def _highlight_selection(idx):
+            """Seçili armatürü vurgula, diğerlerini sönük göster."""
+            for i, (frm, num_lbl, name_lbl) in enumerate(opt_labels):
+                if i == idx:
+                    frm.config(bg="#0d2137")
+                    num_lbl.config(bg="#0d2137", fg="#00e5ff")
+                    name_lbl.config(bg="#0d2137", fg="#ffffff")
+                else:
+                    frm.config(bg="#1a1a2e")
+                    num_lbl.config(bg="#1a1a2e", fg="#ffb300")
+                    name_lbl.config(bg="#1a1a2e", fg="#b0bec5")
+
+        def _assign_luminaire(idx):
+            """Odaya armatür ata."""
+            room = current_room[0]
+            if room is None:
+                return
+            sel      = LUMINAIRES[idx]
+            room_id  = room["id"]
+            r_name   = room.get("name") or f"Mekan {room_id}"
+            r_num    = room.get("number") or ""
+            room_assignments[room_id] = {
+                "name":      r_name,
+                "number":    r_num,
+                "luminaire": sel,
+            }
+            _highlight_selection(idx)
+            # GstarCAD komut satırına yaz
+            try:
+                prefix = f"{r_num} · " if r_num else ""
+                doc.Utility.Prompt(f"\n► {prefix}{r_name} → {sel}\n")
+            except Exception:
+                pass
+
+        # Başlangıç mesajı
+        lbl.config(text="  Mekan bekleniyor...  ")
+        sx0, sy0 = win32api.GetCursorPos()
+        root.geometry(f"+{sx0 + 16}+{sy0 + 16}")
+        root.update()
+
+        last_room_id   = [None]
+        hover_ent      = [None]   # GstarCAD'deki kırmızı çerçeve entity objesi
+        end_time       = _time.time() + duration_sec
+        HOVER_LAYER    = "AI_HOVER"
+
+        # AI_HOVER layer oluştur (kırmızı)
+        try:
+            hl = doc.Layers.Add(HOVER_LAYER)
+            hl.Color = 1   # kırmızı
+        except Exception:
+            pass
+
+        def _draw_highlight(pts_mm):
+            """Odanın polygon'unu GstarCAD'de kırmızı çizer, entity objesi döner."""
+            try:
+                import pythoncom as _pc
+                flat = []
+                for p in pts_mm:
+                    flat += [p[0], p[1]]
+                pts_var = win32com.client.VARIANT(
+                    _pc.VT_ARRAY | _pc.VT_R8, flat)
+                msp = doc.ModelSpace
+                poly = msp.AddLightWeightPolyline(pts_var)
+                poly.Closed = True
+                poly.Layer  = HOVER_LAYER
+                poly.Color  = 1       # kırmızı
+                poly.LineWeight = 50  # 0.50mm kalın
+                return poly
+            except Exception:
+                return None
+
+        def _erase_highlight(ent):
+            """Entity objesini sil."""
+            if ent is None:
+                return
+            try:
+                ent.Delete()
+            except Exception:
+                pass
+
+        def _tick():
+            if _time.time() > end_time:
+                _erase_highlight(hover_ent[0])
+                root.destroy()
+                return
+
+            try:
+                # GstarCAD penceresini bul
+                gcad_hwnd = [None]
+                def _find(h, _):
+                    if not gcad_hwnd[0]:
+                        try:
+                            t = win32gui.GetWindowText(h)
+                            c = win32gui.GetClassName(h)
+                            if win32gui.IsWindowVisible(h) and ("GstarCAD" in t or "GCAD" in c):
+                                gcad_hwnd[0] = h
+                        except Exception:
+                            pass
+                win32gui.EnumWindows(_find, None)
+                hwnd = gcad_hwnd[0] or win32gui.GetForegroundWindow()
+
+                rect  = win32gui.GetClientRect(hwnd)
+                win_w = max(rect[2] - rect[0], 1)
+                win_h = max(rect[3] - rect[1], 1)
+                pt    = ctypes.wintypes.POINT(0, 0)
+                ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
+
+                sx, sy = win32api.GetCursorPos()
+                rel_x  = (sx - pt.x) / win_w
+                rel_y  = (sy - pt.y) / win_h
+
+                vp    = doc.ActiveViewport
+                vp_cx, vp_cy = vp.Center[0], vp.Center[1]
+                vp_h  = vp.Height
+                vp_w  = vp_h * (win_w / win_h)
+                dx    = vp_cx + (rel_x - 0.5) * vp_w
+                dy    = vp_cy - (rel_y - 0.5) * vp_h
+
+                found = None
+                for room in rooms:
+                    if _in_poly(dx, dy, room["points"]):
+                        found = room
+                        break
+
+                # ── Hotkey poll: 1 / 2 / 3 ──────────────────────────────────
+                for ki, vk in enumerate(HOTKEYS):
+                    is_down = bool(win32api.GetAsyncKeyState(vk) & 0x8000)
+                    if is_down and not key_was_down[ki]:
+                        _assign_luminaire(ki)
+                    key_was_down[ki] = is_down
+
+                if found:
+                    rid = found["id"]
+                    if rid != last_room_id[0]:
+                        # Eski çerçeveyi sil, yenisini çiz
+                        _erase_highlight(hover_ent[0])
+                        hover_ent[0]    = _draw_highlight(found["points"])
+                        last_room_id[0] = rid
+                        current_room[0] = found
+                        name   = found.get("name") or "İSİMSİZ"
+                        number = found.get("number") or ""
+                        area   = found.get("area_m2", 0)
+                        prefix = f"{number} · " if number else ""
+                        lbl.config(text=f"  {prefix}{name}  |  {area:.1f} m²")
+                        # Önceki seçimi geri yükle (varsa)
+                        prev_lum = room_assignments.get(rid, {}).get("luminaire", "")
+                        if prev_lum in LUMINAIRES:
+                            _highlight_selection(LUMINAIRES.index(prev_lum))
+                        else:
+                            _highlight_selection(-1)
+                    root.geometry(f"+{sx + 16}+{sy + 16}")
+                    root.deiconify()
+                else:
+                    if last_room_id[0] is not None:
+                        _erase_highlight(hover_ent[0])
+                        hover_ent[0]    = None
+                        last_room_id[0] = None
+                        current_room[0] = None
+                    root.withdraw()
+
+            except Exception:
+                pass
+
+            root.after(200, _tick)
+
+        root.after(200, _tick)
+        root.mainloop()
+        _erase_highlight(hover_ent[0])
+        # Atamalar sonucu JSON'a yaz
+        import json as _j
+        out_path = os.path.splitext(dxf_path)[0] + "_armatür.json"
+        try:
+            with open(out_path, "w", encoding="utf-8") as _f:
+                _j.dump(room_assignments, _f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        pythoncom.CoUninitialize()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    return _json.dumps({
+        "durum":      "başlatıldı",
+        "sure_sn":    duration_sec,
+        "mekan_sayisi": len(rooms),
+        "mesaj":      f"Fare tooltip {duration_sec} saniye aktif. GstarCAD'de odalara göz atın.",
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def get_room_at_cursor(dxf_path: str) -> str:
+    """
+    Fare imlecinin GstarCAD'de üzerinde bulunduğu mekanı döner.
+    GstarCAD aktif ve dxf_path ile aynı çizim açık olmalıdır.
+
+    1. Win32 API ile ekran koordinatını alır
+    2. GstarCAD COM viewport'undan çizim koordinatına çevirir
+    3. match_rooms_to_polygons() polygon listesine karşı point-in-polygon uygular
+    4. Mekan adı + numarası + alanı döner
+
+    Args:
+        dxf_path: Temizlenmiş DXF dosyasının tam yolu
+    """
+    import win32api, win32gui, win32con
+    import win32com.client, pythoncom
+    import json as _json, math as _math, time as _time
+    import ctypes
+
+    # ── 1. GstarCAD bağlantısı ───────────────────────────────────────────────
+    for attempt in range(3):
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+            _ = doc.Name
+            break
+        except Exception:
+            if attempt == 2:
+                return _json.dumps({"hata": "GstarCAD bağlantısı kurulamadı"}, ensure_ascii=False)
+            _time.sleep(1)
+
+    # ── 2. Ekran fare koordinatı ─────────────────────────────────────────────
+    screen_x, screen_y = win32api.GetCursorPos()
+
+    # ── 3. GstarCAD pencere bilgileri ────────────────────────────────────────
+    # GstarCAD ana penceresi
+    hwnd = None
+    def _enum(h, _):
+        nonlocal hwnd
+        cls = win32gui.GetClassName(h)
+        if "GstarCAD" in cls or "GCAD" in cls or "AutoCAD" in cls:
+            hwnd = h
+    win32gui.EnumWindows(_enum, None)
+
+    if hwnd is None:
+        # Fallback: foreground window
+        hwnd = win32gui.GetForegroundWindow()
+
+    rect = win32gui.GetClientRect(hwnd)
+    win_w = rect[2] - rect[0]
+    win_h = rect[3] - rect[1]
+
+    # Pencere sol-üst köşesi (screen koordinatında)
+    client_origin = ctypes.wintypes.POINT(0, 0)
+    ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(client_origin))
+    win_left = client_origin.x
+    win_top  = client_origin.y
+
+    # Fare → pencere içi pozisyon (0..1 arası normalize)
+    rel_x = (screen_x - win_left) / max(win_w, 1)
+    rel_y = (screen_y - win_top)  / max(win_h, 1)
+
+    # ── 4. Viewport'tan çizim koordinatına çevir ─────────────────────────────
+    try:
+        vp      = doc.ActiveViewport
+        vp_cx   = vp.Center[0]   # çizim merkezi x
+        vp_cy   = vp.Center[1]   # çizim merkezi y
+        vp_h    = vp.Height       # viewport yüksekliği (çizim birimi)
+        vp_w    = vp_h * (win_w / max(win_h, 1))   # en-boy oranı koru
+
+        draw_x = vp_cx + (rel_x - 0.5) * vp_w
+        draw_y = vp_cy - (rel_y - 0.5) * vp_h   # Y ekranı ters
+    except Exception as e:
+        return _json.dumps({"hata": f"Viewport bilgisi alınamadı: {e}"}, ensure_ascii=False)
+
+    # ── 5. Point-in-polygon ───────────────────────────────────────────────────
+    matched = _json.loads(match_rooms_to_polygons(dxf_path))
+    rooms   = [r for r in matched["rooms"] if r["points"]]
+
+    def _in_poly(px, py, pts):
+        inside, j = False, len(pts) - 1
+        for i in range(len(pts)):
+            xi, yi = pts[i]
+            xj, yj = pts[j]
+            if ((yi > py) != (yj > py)) and (px < (xj-xi)*(py-yi)/(yj-yi+1e-12)+xi):
+                inside = not inside
+            j = i
+        return inside
+
+    found = None
+    for room in rooms:
+        if _in_poly(draw_x, draw_y, room["points"]):
+            found = room
+            break
+
+    if found:
+        return _json.dumps({
+            "bulundu":   True,
+            "name":      found["name"],
+            "number":    found["number"],
+            "area_m2":   found["area_m2"],
+            "status":    found["status"],
+            "cursor_draw": [round(draw_x, 1), round(draw_y, 1)],
+        }, ensure_ascii=False, indent=2)
+    else:
+        return _json.dumps({
+            "bulundu":     False,
+            "mesaj":       "İmleç herhangi bir mekanın üzerinde değil",
+            "cursor_draw": [round(draw_x, 1), round(draw_y, 1)],
+        }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
