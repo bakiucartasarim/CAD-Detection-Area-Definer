@@ -713,6 +713,29 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
     for e in to_del:
         msp.delete_entity(e)
 
+    # TARAMA layer LWPOLYLINE (kablo numarası çerçeveleri)
+    tarama_del = [e for e in msp
+                  if e.dxf.layer.upper() in ('TARAMA', 'TAR1', 'TAR2', 'TAR3')
+                  and e.dxftype() in ('LWPOLYLINE', 'LINE', 'HATCH')]
+    for e in tarama_del:
+        msp.delete_entity(e)
+
+    # Blok tanımları içindeki elektrik layer entity'lerini temizle
+    # (Xref flatten blokları: MSE01, MCM01, DASH1L vb. içerebilir)
+    block_internal_del = 0
+    for block in doc.blocks:
+        if block.name.startswith('*'):
+            continue
+        elec_in_block = [e for e in block
+                         if _is_electric_layer(e.dxf.layer.upper())
+                         and e.dxftype() in _ALL_TYPES]
+        for e in elec_in_block:
+            try:
+                block.delete_entity(e)
+                block_internal_del += 1
+            except Exception:
+                pass
+
     if not output_path:
         p = Path(dxf_path)
         output_path = str(p.parent / (p.stem + "_ELEC" + p.suffix))
@@ -721,6 +744,8 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
 
     result = {
         "silinen_insert": len(to_del),
+        "tarama_silindi": len(tarama_del),
+        "blok_ici_silindi": block_internal_del,
         "layer_dagilimi": layer_dist,
         "blok_dagilimi":  block_dist,
         "cikti_dosya":    output_path,
