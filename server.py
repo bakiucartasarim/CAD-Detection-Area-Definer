@@ -277,6 +277,85 @@ def export_walls_ifc(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# ── İŞARETLEME ADIMLARI ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def identify_rooms(dxf_path: str) -> str:
+    """
+    İŞARETLEME ADIM 1 — Mekan isimlerini belirle.
+    DXF'teki MAHAL bloklarından oda adı, numarası ve alanını okur.
+    colorize_rooms_in_cad() öncesinde çalıştırılır.
+
+    Args:
+        dxf_path: Temizlenmiş DXF dosyasının tam yolu
+    Returns:
+        JSON: rooms listesi [{id, name, number, area_m2, x, y}]
+    """
+    import ezdxf as _ezdxf
+
+    def _parse_area(raw: str) -> float:
+        try:
+            return float(raw.replace(",", ".").replace("m2", "").replace("m²", "").strip())
+        except Exception:
+            return 0.0
+
+    # utf-8 ile oku — GstarCAD header'da ANSI_1254 yazar ama içerik UTF-8'dir
+    try:
+        doc = _ezdxf.readfile(dxf_path, encoding="utf-8")
+    except Exception:
+        doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    rooms = []
+    for e in msp:
+        if e.dxftype() != "INSERT":
+            continue
+        layer = e.dxf.layer.upper()
+        bname = e.dxf.name.upper()
+        if not ("MAHAL" in layer or "MAHAL" in bname or "ROOM" in layer or "0ASM" in layer):
+            continue
+        if not hasattr(e, "attribs") or not e.attribs:
+            continue
+
+        attrs = {a.dxf.tag.upper(): a.dxf.text for a in e.attribs}
+
+        name = (attrs.get("ROOMOBJECTS:NAME") or attrs.get("NAME") or
+                attrs.get("MAHAL_ADI") or attrs.get("MAHAL") or "")
+        number = (attrs.get("ROOMOBJECTS:NUMBER") or attrs.get("NUMBER") or
+                  attrs.get("MAHALNO") or "")
+        area_raw = (attrs.get("ALAN:NAME") or attrs.get("ALAN") or
+                    attrs.get("AREA") or "0")
+
+        name   = name.strip()
+        number = number.strip()
+        area_m2 = _parse_area(area_raw)
+
+        if not name and not number:
+            continue
+
+        rooms.append({
+            "id": len(rooms),
+            "name": name,
+            "number": number,
+            "area_m2": area_m2,
+            "x": round(e.dxf.insert.x, 1),
+            "y": round(e.dxf.insert.y, 1),
+            "layer": e.dxf.layer,
+        })
+
+    # numaraya göre sırala
+    rooms.sort(key=lambda r: r["number"])
+    for i, r in enumerate(rooms):
+        r["id"] = i
+
+    result = {
+        "toplam": len(rooms),
+        "rooms": rooms,
+        "sonraki_adim": "colorize_rooms_in_cad() ile mekanları renklendir"
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 @mcp.tool()
 def colorize_rooms_in_cad(dxf_path: str) -> str:
     """
