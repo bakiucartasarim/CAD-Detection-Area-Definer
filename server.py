@@ -25,6 +25,31 @@ import json
 import sys
 import os
 
+# ── Korunan layer'lar — HİÇBİR adım bunları silmez ─────────────────────────
+# Oda adı/numarası/alanı gibi mimari bilgi layer'larıdır.
+_PROTECTED_LAYERS = {
+    # Oda bilgi blokları (MAHAL NO, ROOMOBJECTS vb.)
+    "0ASM-MAHAL BİLGİ", "0ASM-MAHAL BILGI", "0ASM-MAHAL",
+    "_AB_MAHALMETIN", "_AB_MAHAL",
+    "MAHAL_ISMI", "MAHAL_BILGI", "MAHAL BILGI",
+    "MAHAL NO", "ROOMOBJECTS", "ROOM_INFO",
+    # Duvar/yapı layer'ları
+    "0ASM-DUVAR", "0ASM-KAPI", "0ASM-PENCERE",
+    "0ASM-SIVA İÇ", "0ASM-SIVA IC", "0ASM-TRETUVAR",
+    # Kolon/taşıyıcı sistem
+    "KOL", "KOLON",
+}
+
+def _is_protected(layer_name: str) -> bool:
+    """Bu layer hiçbir temizleme adımında silinmemeli."""
+    lu = layer_name.upper()
+    if layer_name in _PROTECTED_LAYERS or lu in {l.upper() for l in _PROTECTED_LAYERS}:
+        return True
+    # MAHAL içeren ama colorizer çıktısı olmayan layer'lar
+    if "MAHAL" in lu and not any(x in lu for x in ("KIRMIZI", "YESIL", "MAVI", "RED", "GREEN", "BLUE")):
+        return True
+    return False
+
 # Proje kökünü Python path'e ekle
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -317,6 +342,8 @@ def clean_lighting(dxf_path: str, output_path: str = "") -> str:
     # 1. Armatür INSERT'lerini sil
     armatur_del = []
     for e in msp:
+        if _is_protected(e.dxf.layer):
+            continue
         if e.dxftype() == "INSERT" and _is_lighting_layer(e.dxf.layer.upper()):
             armatur_del.append(e)
     for e in armatur_del:
@@ -382,8 +409,11 @@ def clean_cables(dxf_path: str, output_path: str = "") -> str:
 
     kablo_del = []
     for e in msp:
-        layer = e.dxf.layer.upper()
-        if _is_cable_layer(layer) and e.dxftype() in ("LINE", "LWPOLYLINE", "INSERT", "MTEXT", "TEXT"):
+        layer = e.dxf.layer
+        if _is_protected(layer):
+            continue
+        lu = layer.upper()
+        if _is_cable_layer(lu) and e.dxftype() in ("LINE", "LWPOLYLINE", "INSERT", "MTEXT", "TEXT"):
             kablo_del.append(e)
     for e in kablo_del:
         msp.delete_entity(e)
@@ -534,7 +564,7 @@ def delete_tefris(dxf_path: str, output_path: str = "") -> str:
     doc = _ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
-    to_del = [e for e in msp if _is_tefris_layer(e.dxf.layer.upper())]
+    to_del = [e for e in msp if _is_tefris_layer(e.dxf.layer.upper()) and not _is_protected(e.dxf.layer)]
     layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
 
     for e in to_del:
@@ -577,7 +607,7 @@ def delete_ceiling(dxf_path: str, output_path: str = "") -> str:
     doc = _ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
-    to_del = [e for e in msp if _is_ceiling_layer(e.dxf.layer.upper())]
+    to_del = [e for e in msp if _is_ceiling_layer(e.dxf.layer.upper()) and not _is_protected(e.dxf.layer)]
     layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
 
     for e in to_del:
@@ -619,7 +649,7 @@ def delete_linye(dxf_path: str, output_path: str = "") -> str:
     doc = _ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
-    to_del = [e for e in msp if _is_linye_layer(e.dxf.layer.upper())]
+    to_del = [e for e in msp if _is_linye_layer(e.dxf.layer.upper()) and not _is_protected(e.dxf.layer)]
     layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
     type_dist  = dict(_Counter(e.dxftype()  for e in to_del).most_common())
 
@@ -695,6 +725,8 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
 
     to_del = []
     for e in msp:
+        if _is_protected(e.dxf.layer):
+            continue
         layer = e.dxf.layer.upper()
         etype = e.dxftype()
         # INSERT: elektrik layer veya kablo marker block adı
@@ -793,6 +825,8 @@ def delete_bara(dxf_path: str, output_path: str = "") -> str:
 
     to_del = []
     for e in msp:
+        if _is_protected(e.dxf.layer):
+            continue
         layer = e.dxf.layer.upper()
         etype = e.dxftype()
 
