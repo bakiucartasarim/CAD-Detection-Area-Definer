@@ -832,6 +832,75 @@ def delete_bara(dxf_path: str, output_path: str = "") -> str:
 
 
 @mcp.tool()
+def delete_mahal_markers(dxf_path: str, output_path: str = "") -> str:
+    """
+    ADIM 10 — Önceki colorizer çalışmasından kalan büyük işaret/yazıları sil.
+    colorize_rooms_in_cad veya colorize_mahal_blocks tarafından DXF'e
+    yazılmış ve sonraki çalışmalarda sorun çıkaran artifact'ları temizler.
+
+    Kaldırılanlar:
+      • MAHAL-KIRMIZI layer  (kırmızı daire + büyük "(TANIMSIZ)" yazıları)
+      • MAHAL-YESIL  layer  (yeşil hatch/daire - eğer varsa)
+      • MAHAL-MAVI   layer  (mavi hatch/daire - eğer varsa)
+      • MAHAL-TANIMLI / MAHAL-TANIMSIZ layer'ları (eski format)
+      • "(TANIMSIZ)" veya "(TANIMLI)" içeren tüm TEXT/MTEXT
+
+    Args:
+        dxf_path   : Kaynak DXF
+        output_path: Çıktı yolu (boş bırakılırsa _CLEAN suffix eklenir)
+    """
+    import ezdxf as _ezdxf
+    from pathlib import Path
+    from collections import Counter as _Counter
+
+    _MARKER_LAYERS = {
+        'MAHAL-KIRMIZI', 'MAHAL-YESIL', 'MAHAL-MAVI',
+        'MAHAL-TANIMLI', 'MAHAL-TANIMSIZ',
+        'MAHAL-GREEN', 'MAHAL-RED', 'MAHAL-BLUE',
+    }
+
+    doc = _ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    to_del = []
+    for e in msp:
+        layer = e.dxf.layer.upper()
+        # Bilinen marker layer'ları — tüm entity'ler
+        if layer in {l.upper() for l in _MARKER_LAYERS}:
+            to_del.append(e)
+            continue
+        # "(TANIMSIZ)" veya "(TANIMLI)" içeren büyük yazılar
+        if e.dxftype() in ('TEXT', 'MTEXT'):
+            try:
+                txt = (e.dxf.text if e.dxftype() == 'TEXT'
+                       else e.text if hasattr(e, 'text') else '')
+                if 'TANIMSIZ' in txt.upper() or 'TANIMLI' in txt.upper():
+                    to_del.append(e)
+            except Exception:
+                pass
+
+    layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
+    type_dist  = dict(_Counter(e.dxftype()  for e in to_del).most_common())
+
+    for e in to_del:
+        msp.delete_entity(e)
+
+    if not output_path:
+        p = Path(dxf_path)
+        output_path = str(p.parent / (p.stem + "_CLEAN" + p.suffix))
+
+    doc.saveas(output_path)
+
+    return __import__("json").dumps({
+        "silindi": len(to_del),
+        "layer_dagilimi": layer_dist,
+        "tip_dagilimi": type_dist,
+        "cikti_dosya": output_path,
+        "sonraki_adim": "colorize_mahal_blocks() ile oda renklendirme yapabilirsiniz"
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
 def colorize_mahal_blocks(dxf_path: str) -> str:
     """
     ADIM 9 — MAHAL bloklarını GstarCAD'de renkli daire+metin olarak işaretle.
