@@ -669,27 +669,46 @@ def delete_electric_component(dxf_path: str, output_path: str = "") -> str:
         'EADI','EADİ','EVAV','VAV','IT'
     }
 
+    # Tüm entity tiplerini silecek elektrik layerları
+    _FULL_DELETE_LAYERS = {
+        'ELKMETIN', 'ELK.YAZI', 'ELK YAZI', 'DEHA_ELK',
+        'DEHA_ELK YAZI', 'E-SEMBOL', 'ELKSEMBOL',
+        'MSE01', 'MCM01', 'DASH1L', 'S_M',
+        '+IYI AYDINLATMA', 'AYDINLATMAHAT', 'E-AYDINLATMA',
+    }
+
     def _is_electric_layer(lu: str) -> bool:
+        if lu in _FULL_DELETE_LAYERS:
+            return True
         return any(k in lu for k in (
             'ELEKTR', 'SEMBOL', 'PRIZ', 'ANAHTAR',
             'SIGORTA', 'PANEL', 'ROZET', 'SWITCH',
-            'SOCKET', 'AYDINLATMA', 'ARMATUR', 'ARMATÜR'
+            'SOCKET', 'AYDINLATMA', 'ARMATUR', 'ARMATÜR',
+            'ELK', 'ANAHTARPRIZ',
         )) or 'HAT' in lu
+
+    # Tüm entity tipleri silinecek layer'lar (sadece INSERT değil)
+    _ALL_TYPES = ('INSERT', 'TEXT', 'MTEXT', 'LINE', 'ARC', 'CIRCLE', 'LWPOLYLINE')
 
     doc = _ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
     to_del = []
     for e in msp:
-        if e.dxftype() != 'INSERT':
-            continue
         layer = e.dxf.layer.upper()
-        name  = e.dxf.name
-        if _is_electric_layer(layer) or name in _CABLE_MARKER_BLOCKS:
+        etype = e.dxftype()
+        # INSERT: elektrik layer veya kablo marker block adı
+        if etype == 'INSERT':
+            name = e.dxf.name
+            if _is_electric_layer(layer) or name in _CABLE_MARKER_BLOCKS:
+                to_del.append(e)
+        # Diğer tipler: sadece açıkça elektrik olan layer'larda
+        elif etype in _ALL_TYPES and _is_electric_layer(layer):
             to_del.append(e)
 
     layer_dist = dict(_Counter(e.dxf.layer for e in to_del).most_common())
-    block_dist = dict(_Counter(e.dxf.name  for e in to_del).most_common())
+    block_dist = dict(_Counter(e.dxf.name  for e in to_del
+                               if e.dxftype() == 'INSERT').most_common())
 
     for e in to_del:
         msp.delete_entity(e)
