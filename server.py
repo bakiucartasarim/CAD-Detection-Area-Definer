@@ -1093,8 +1093,11 @@ def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
 
         LUMINAIRES   = ["Flat-G", "Lightline 043", "Snow 019"]
         HOTKEYS      = [ord('1'), ord('2'), ord('3')]   # VK codes
-        room_assignments = {}   # room_id → seçilen armatür
-        key_was_down = [False, False, False]            # debounce
+        VK_LEFT, VK_RIGHT = 0x25, 0x27                 # ok tuşları
+        room_assignments  = {}   # room_id → seçilen armatür
+        key_was_down      = [False, False, False]       # 1/2/3 debounce
+        arrow_was_down    = [False, False]              # sol/sağ debounce
+        current_idx       = [-1]                        # seçili armatür index
 
         # ── Tooltip penceresi ─────────────────────────────────────────────────
         root = tk.Tk()
@@ -1150,6 +1153,8 @@ def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
             room = current_room[0]
             if room is None:
                 return
+            idx = idx % len(LUMINAIRES)
+            current_idx[0] = idx
             sel      = LUMINAIRES[idx]
             room_id  = room["id"]
             r_name   = room.get("name") or f"Mekan {room_id}"
@@ -1160,7 +1165,6 @@ def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
                 "luminaire": sel,
             }
             _highlight_selection(idx)
-            # GstarCAD komut satırına yaz
             try:
                 prefix = f"{r_num} · " if r_num else ""
                 doc.Utility.Prompt(f"\n► {prefix}{r_name} → {sel}\n")
@@ -1257,12 +1261,24 @@ def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
                         found = room
                         break
 
-                # ── Hotkey poll: 1 / 2 / 3 ──────────────────────────────────
+                # ── Hotkey poll: 1/2/3 ve ←/→ ok tuşları ───────────────────
                 for ki, vk in enumerate(HOTKEYS):
                     is_down = bool(win32api.GetAsyncKeyState(vk) & 0x8000)
                     if is_down and not key_was_down[ki]:
                         _assign_luminaire(ki)
                     key_was_down[ki] = is_down
+
+                # Sol ok → önceki armatür
+                left_down = bool(win32api.GetAsyncKeyState(VK_LEFT) & 0x8000)
+                if left_down and not arrow_was_down[0] and current_room[0] is not None:
+                    _assign_luminaire(current_idx[0] - 1)
+                arrow_was_down[0] = left_down
+
+                # Sağ ok → sonraki armatür
+                right_down = bool(win32api.GetAsyncKeyState(VK_RIGHT) & 0x8000)
+                if right_down and not arrow_was_down[1] and current_room[0] is not None:
+                    _assign_luminaire(current_idx[0] + 1)
+                arrow_was_down[1] = right_down
 
                 if found:
                     rid = found["id"]
@@ -1280,8 +1296,11 @@ def watch_room_at_cursor(dxf_path: str, duration_sec: int = 60) -> str:
                         # Önceki seçimi geri yükle (varsa)
                         prev_lum = room_assignments.get(rid, {}).get("luminaire", "")
                         if prev_lum in LUMINAIRES:
-                            _highlight_selection(LUMINAIRES.index(prev_lum))
+                            prev_idx = LUMINAIRES.index(prev_lum)
+                            current_idx[0] = prev_idx
+                            _highlight_selection(prev_idx)
                         else:
+                            current_idx[0] = -1
                             _highlight_selection(-1)
                     root.geometry(f"+{sx + 16}+{sy + 16}")
                     root.deiconify()
@@ -1432,6 +1451,257 @@ def get_room_at_cursor(dxf_path: str) -> str:
             "mesaj":       "İmleç herhangi bir mekanın üzerinde değil",
             "cursor_draw": [round(draw_x, 1), round(draw_y, 1)],
         }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def open_luminaire_picker(
+    dxf_path: str,
+    luminaires: str = "Flat-G,Lightline 043,Snow 019",
+) -> str:
+    """
+    Mekan → Armatür atama penceresi açar.
+    Sol panel: tüm mekanlar listesi.
+    Sağ panel: armatür listesi.
+    Mekan seçilince GstarCAD'de kırmızı çerçeve + zoom.
+    Armatür tıklanınca atanır. Kaydet → JSON dosyası.
+
+    Args:
+        dxf_path  : Temizlenmiş DXF dosyasının tam yolu
+        luminaires: Virgülle ayrılmış armatür listesi
+    """
+    import threading, json as _json, time as _time, math as _m
+    import win32com.client, pythoncom
+
+    lum_list = [l.strip() for l in luminaires.split(",") if l.strip()]
+
+    # Mekan verilerini yükle
+    data  = _json.loads(match_rooms_to_polygons(dxf_path))
+    rooms = [r for r in data["rooms"] if r["points"]]  # polygon'u olanlar
+
+    def _run():
+        import tkinter as tk
+        import tkinter.ttk as ttk
+        import tkinter.messagebox as msgbox
+        pythoncom.CoInitialize()
+
+        # GstarCAD bağlantısı
+        try:
+            acad = win32com.client.GetActiveObject("GstarCAD.Application")
+            doc  = acad.ActiveDocument
+            msp  = doc.ModelSpace
+        except Exception:
+            acad = doc = msp = None
+
+        HOVER_LAYER = "AI_HOVER"
+        if doc:
+            try:
+                hl = doc.Layers.Add(HOVER_LAYER)
+                hl.Color = 1
+            except Exception:
+                pass
+
+        assignments = {}   # room_id → luminaire
+        hover_ent   = [None]
+
+        def _draw_border(pts_mm):
+            if not doc:
+                return None
+            try:
+                flat = []
+                for p in pts_mm:
+                    flat += [p[0], p[1]]
+                pts_var = win32com.client.VARIANT(
+                    pythoncom.VT_ARRAY | pythoncom.VT_R8, flat)
+                poly = msp.AddLightWeightPolyline(pts_var)
+                poly.Closed   = True
+                poly.Layer    = HOVER_LAYER
+                poly.Color    = 1
+                poly.LineWeight = 50
+                return poly
+            except Exception:
+                return None
+
+        def _erase_border(ent):
+            if ent:
+                try:
+                    ent.Delete()
+                except Exception:
+                    pass
+
+        def _zoom_to(room):
+            if not doc:
+                return
+            try:
+                pts = room["points"]
+                xs  = [p[0] for p in pts]
+                ys  = [p[1] for p in pts]
+                pad = 2000
+                doc.SendCommand(
+                    f"ZOOM W {min(xs)-pad},{min(ys)-pad} {max(xs)+pad},{max(ys)+pad}\n")
+            except Exception:
+                pass
+
+        # ── Tkinter penceresi ─────────────────────────────────────────────
+        root = tk.Tk()
+        root.title("Mekan Armatür Atama")
+        root.configure(bg="#0d1b2a")
+        root.geometry("680x520")
+        root.resizable(True, True)
+        root.attributes("-topmost", True)
+
+        BG      = "#0d1b2a"
+        BG2     = "#1a2a3a"
+        ACCENT  = "#00e5ff"
+        FG      = "#e0e0ff"
+        FG2     = "#b0bec5"
+        SEL_BG  = "#0d3a4a"
+        LUM_SEL = "#1a4a1a"
+        FONT    = ("Segoe UI", 10)
+        FONT_B  = ("Segoe UI", 10, "bold")
+        FONT_S  = ("Segoe UI", 9)
+
+        # ── Başlık ───────────────────────────────────────────────────────
+        hdr = tk.Label(root, text="MEKAN ARMATÜR ATAMA",
+                       bg=BG, fg=ACCENT, font=("Segoe UI", 12, "bold"), pady=8)
+        hdr.pack(fill="x")
+        tk.Frame(root, bg=ACCENT, height=1).pack(fill="x")
+
+        # ── Ana içerik ───────────────────────────────────────────────────
+        content = tk.Frame(root, bg=BG)
+        content.pack(fill="both", expand=True, padx=10, pady=8)
+
+        # Sol: mekan listesi
+        left = tk.Frame(content, bg=BG)
+        left.pack(side="left", fill="both", expand=True)
+        tk.Label(left, text="MEKANLAR", bg=BG, fg=ACCENT,
+                 font=FONT_B).pack(anchor="w", pady=(0,4))
+
+        room_lb = tk.Listbox(left, bg=BG2, fg=FG, selectbackground=SEL_BG,
+                             selectforeground=ACCENT, font=FONT_S,
+                             relief="flat", bd=0, activestyle="none",
+                             highlightthickness=1, highlightcolor=ACCENT,
+                             highlightbackground=BG2)
+        sb_r = ttk.Scrollbar(left, orient="vertical", command=room_lb.yview)
+        room_lb.config(yscrollcommand=sb_r.set)
+        sb_r.pack(side="right", fill="y")
+        room_lb.pack(fill="both", expand=True)
+
+        # Mekan listesini doldur
+        for r in rooms:
+            num    = r.get("number") or ""
+            name   = r.get("name") or "İSİMSİZ"
+            area   = r.get("area_m2", 0)
+            prefix = f"{num} · " if num else ""
+            room_lb.insert("end", f"  {prefix}{name}  [{area:.1f} m²]")
+
+        # Orta ayraç
+        tk.Frame(content, bg=ACCENT, width=1).pack(side="left", fill="y", padx=8)
+
+        # Sağ: armatür listesi
+        right = tk.Frame(content, bg=BG)
+        right.pack(side="left", fill="both", expand=True)
+        tk.Label(right, text="ARMATÜRLER", bg=BG, fg=ACCENT,
+                 font=FONT_B).pack(anchor="w", pady=(0,4))
+
+        lum_lb = tk.Listbox(right, bg=BG2, fg=FG, selectbackground=LUM_SEL,
+                            selectforeground="#00ff88", font=FONT,
+                            relief="flat", bd=0, activestyle="none",
+                            highlightthickness=1, highlightcolor=ACCENT,
+                            highlightbackground=BG2)
+        for lum in lum_list:
+            lum_lb.insert("end", f"  {lum}")
+        lum_lb.pack(fill="both", expand=True)
+
+        # ── Durum satırı ─────────────────────────────────────────────────
+        tk.Frame(root, bg=ACCENT, height=1).pack(fill="x")
+        status_var = tk.StringVar(value="Mekan seçin, ardından armatür tıklayın.")
+        status_lbl = tk.Label(root, textvariable=status_var, bg=BG, fg=FG2,
+                              font=FONT_S, pady=4)
+        status_lbl.pack(fill="x", padx=10)
+
+        # ── Alt butonlar ─────────────────────────────────────────────────
+        btn_frame = tk.Frame(root, bg=BG)
+        btn_frame.pack(fill="x", padx=10, pady=6)
+
+        assigned_lbl = tk.Label(btn_frame, text="Atanan: 0", bg=BG, fg=FG2,
+                                font=FONT_S)
+        assigned_lbl.pack(side="left")
+
+        def _save():
+            out = os.path.splitext(dxf_path)[0] + "_armatür.json"
+            with open(out, "w", encoding="utf-8") as f:
+                _json.dump(assignments, f, ensure_ascii=False, indent=2)
+            msgbox.showinfo("Kaydedildi", f"{len(assignments)} atama kaydedildi.\n{out}")
+
+        tk.Button(btn_frame, text="Kaydet", bg="#1a3a1a", fg="#00ff88",
+                  font=FONT_B, relief="flat", padx=16, pady=4,
+                  command=_save).pack(side="right")
+        tk.Button(btn_frame, text="Kapat", bg="#3a1a1a", fg="#ff6b6b",
+                  font=FONT_S, relief="flat", padx=12, pady=4,
+                  command=root.destroy).pack(side="right", padx=6)
+
+        selected_room = [None]
+
+        def _on_room_select(event=None):
+            sel = room_lb.curselection()
+            if not sel:
+                return
+            idx  = sel[0]
+            room = rooms[idx]
+            selected_room[0] = room
+
+            # Eski border sil, yeni çiz + zoom
+            _erase_border(hover_ent[0])
+            hover_ent[0] = _draw_border(room["points"])
+            _zoom_to(room)
+
+            # Mevcut atamayı göster
+            rid      = room["id"]
+            cur_lum  = assignments.get(rid, {}).get("luminaire", "")
+            if cur_lum in lum_list:
+                lum_lb.selection_clear(0, "end")
+                lum_lb.selection_set(lum_list.index(cur_lum))
+            name = room.get("name") or "İSİMSİZ"
+            num  = room.get("number") or ""
+            prefix = f"{num} · " if num else ""
+            status_var.set(f"Seçili: {prefix}{name}  — Armatür tıklayın")
+
+        def _on_lum_select(event=None):
+            sel_r = room_lb.curselection()
+            sel_l = lum_lb.curselection()
+            if not sel_r or not sel_l:
+                return
+            room = rooms[sel_r[0]]
+            lum  = lum_list[sel_l[0]]
+            rid  = room["id"]
+            r_name = room.get("name") or f"Mekan {rid}"
+            r_num  = room.get("number") or ""
+            assignments[rid] = {"name": r_name, "number": r_num, "luminaire": lum}
+            assigned_lbl.config(text=f"Atanan: {len(assignments)}")
+            prefix = f"{r_num} · " if r_num else ""
+            status_var.set(f"✓  {prefix}{r_name}  →  {lum}")
+            # Listede vurgula
+            room_lb.itemconfig(sel_r[0], fg="#00ff88")
+
+        room_lb.bind("<<ListboxSelect>>", _on_room_select)
+        lum_lb.bind("<<ListboxSelect>>", _on_lum_select)
+
+        def _on_close():
+            _erase_border(hover_ent[0])
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", _on_close)
+        root.mainloop()
+        pythoncom.CoUninitialize()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    return _json.dumps({
+        "durum":   "pencere açıldı",
+        "mekanlar": len(rooms),
+        "armatürler": lum_list,
+    }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
