@@ -1748,9 +1748,12 @@ def open_luminaire_picker(
         tk.Button(btn_frame, text="Kaydet", bg="#1a3a1a", fg="#00ff88",
                   font=FONT_B, relief="flat", padx=16, pady=4,
                   command=_save).pack(side="right")
+        tk.Button(btn_frame, text="Çiz", bg="#1a2a3a", fg="#00cfff",
+                  font=FONT_B, relief="flat", padx=16, pady=4,
+                  command=_on_draw).pack(side="right", padx=6)
         tk.Button(btn_frame, text="Kapat", bg="#3a1a1a", fg="#ff6b6b",
                   font=FONT_S, relief="flat", padx=12, pady=4,
-                  command=root.destroy).pack(side="right", padx=6)
+                  command=_on_close).pack(side="right", padx=6)
 
         selected_room = [None]
 
@@ -1785,20 +1788,32 @@ def open_luminaire_picker(
                 return
             room = rooms[sel_r[0]]
             lum  = lum_list[sel_l[0]]
-            rid  = room["id"]
+            r_name = room.get("name") or f"Mekan {room['id']}"
+            r_num  = room.get("number") or ""
+            prefix = f"{r_num} · " if r_num else ""
+            status_var.set(f"Seçili: {prefix}{r_name}  →  {lum}  — Çiz'e bas")
+
+        def _on_draw():
+            sel_r = room_lb.curselection()
+            sel_l = lum_lb.curselection()
+            if not sel_r or not sel_l:
+                status_var.set("Önce mekan ve armatür seçin!")
+                return
+            room   = rooms[sel_r[0]]
+            lum    = lum_list[sel_l[0]]
+            rid    = room["id"]
             r_name = room.get("name") or f"Mekan {rid}"
             r_num  = room.get("number") or ""
             assignments[rid] = {"name": r_name, "number": r_num, "luminaire": lum}
             assigned_lbl.config(text=f"Atanan: {len(assignments)}")
             prefix = f"{r_num} · " if r_num else ""
-            # Armatür yerleştir
             count, err = _place_luminaires(room, lum)
             status_var.set(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
-            # Listede vurgula
             room_lb.itemconfig(sel_r[0], fg="#00ff88")
 
         room_lb.bind("<<ListboxSelect>>", _on_room_select)
         lum_lb.bind("<<ListboxSelect>>", _on_lum_select)
+        lum_lb.bind("<Double-Button-1>", lambda e: _on_draw())  # çift tık da çizer
 
         def _on_close():
             _erase_border(hover_ent[0])
