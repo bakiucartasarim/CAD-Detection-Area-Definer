@@ -1747,16 +1747,6 @@ def open_luminaire_picker(
                 _json.dump(assignments, f, ensure_ascii=False, indent=2)
             msgbox.showinfo("Kaydedildi", f"{len(assignments)} atama kaydedildi.\n{out}")
 
-        tk.Button(btn_frame, text="Kaydet", bg="#1a3a1a", fg="#00ff88",
-                  font=FONT_B, relief="flat", padx=16, pady=4,
-                  command=_save).pack(side="right")
-        tk.Button(btn_frame, text="Çiz", bg="#1a2a3a", fg="#00cfff",
-                  font=FONT_B, relief="flat", padx=16, pady=4,
-                  command=_on_draw).pack(side="right", padx=6)
-        tk.Button(btn_frame, text="Kapat", bg="#3a1a1a", fg="#ff6b6b",
-                  font=FONT_S, relief="flat", padx=12, pady=4,
-                  command=_on_close).pack(side="right", padx=6)
-
         selected_room = [None]
 
         def _on_room_select(event=None):
@@ -1813,14 +1803,24 @@ def open_luminaire_picker(
             _set_status(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
             room_lb.itemconfig(sel_r[0], fg="#00ff88")
 
-        room_lb.bind("<<ListboxSelect>>", _on_room_select)
-        lum_lb.bind("<<ListboxSelect>>", _on_lum_select)
-        lum_lb.bind("<Double-Button-1>", lambda e: _on_draw())  # çift tık da çizer
-
         def _on_close():
             _erase_border(hover_ent[0])
-            # Yerleştirilen armatürleri KORU — sadece border silinir
             root.destroy()
+
+        room_lb.bind("<<ListboxSelect>>", _on_room_select)
+        lum_lb.bind("<<ListboxSelect>>", _on_lum_select)
+        lum_lb.bind("<Double-Button-1>", lambda e: _on_draw())
+
+        # ── Butonlar (fonksiyonlar tanımlandıktan sonra) ──────────────────
+        tk.Button(btn_frame, text="Kaydet", bg="#1a3a1a", fg="#00ff88",
+                  font=FONT_B, relief="flat", padx=16, pady=4,
+                  command=_save).pack(side="right")
+        tk.Button(btn_frame, text="Çiz", bg="#1a2a3a", fg="#00cfff",
+                  font=FONT_B, relief="flat", padx=16, pady=4,
+                  command=_on_draw).pack(side="right", padx=6)
+        tk.Button(btn_frame, text="Kapat", bg="#3a1a1a", fg="#ff6b6b",
+                  font=FONT_S, relief="flat", padx=12, pady=4,
+                  command=_on_close).pack(side="right", padx=6)
 
         root.protocol("WM_DELETE_WINDOW", _on_close)
         root.mainloop()
