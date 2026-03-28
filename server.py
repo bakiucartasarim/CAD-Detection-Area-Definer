@@ -1488,8 +1488,40 @@ def open_luminaire_picker(
     # INSUNITS: 4=mm, 5=cm, 6=m, 1=inch, 0=birim yok (mm varsay)
     _MM_PER_UNIT = {4: 1.0, 5: 10.0, 6: 1000.0, 1: 25.4, 2: 304.8, 3: 1609344.0}
     _mm_per = _MM_PER_UNIT.get(_insunits, 1.0)   # 1 drawing unit = kaç mm
-    BLOCK_SIZE  = 600.0 / _mm_per    # 600mm → drawing units (mm'de 600, cm'de 60, m'de 0.6)
-    GRID_SPACE  = 1500.0 / _mm_per   # 1500mm grid aralığı → drawing units
+    BLOCK_SIZE  = 600.0 / _mm_per    # 600mm armatür boyutu → drawing units
+
+    # Armatür lümen değerleri (default) — isme göre eşleştirme
+    _LUM_LUMENS_DEFAULT = {
+        "flat-g":       3600,
+        "lightline 043":4300,
+        "lightline":    4300,
+        "snow 019":     2800,
+        "snow":         2800,
+    }
+    def _lum_lumens(name: str) -> int:
+        k = name.lower()
+        for pat, val in _LUM_LUMENS_DEFAULT.items():
+            if pat in k:
+                return val
+        return 3000  # bilinmeyen armatür için default
+
+    # Oda tipine göre hedef lüx tablosu (Türkçe isim eşleştirme)
+    _ROOM_LUX = [
+        (["laboratuvar", "lab"],          750),
+        (["muayene", "tedavi", "ameliyat"], 500),
+        (["ofis", "büro", "çalışma"],      500),
+        (["mutfak", "yemekhane"],          300),
+        (["wc", "tuvalet", "banyo", "duş"],200),
+        (["koridor", "hol", "giriş", "lobi"], 200),
+        (["depo", "arşiv", "teknik"],      150),
+        (["mescit", "ibadet"],             300),
+    ]
+    def _room_lux(room_name: str) -> int:
+        k = (room_name or "").lower()
+        for keywords, lux in _ROOM_LUX:
+            if any(kw in k for kw in keywords):
+                return lux
+        return 300  # genel ofis/mekan default
 
     def _run():
         import tkinter as tk
@@ -1575,7 +1607,8 @@ def open_luminaire_picker(
             placed_ents[room_id] = []
 
         def _place_luminaires(room, lum_name):
-            """Odaya 60×60cm (600mm) kare grid yerleşimi çiz — birim otomatik."""
+            """Lüx hesabına göre armatür grid yerleşimi — birim otomatik."""
+            import math as _math
             if not doc:
                 return 0, "GstarCAD bağlantısı yok"
             room_id = room["id"]
@@ -1586,14 +1619,31 @@ def open_luminaire_picker(
             ys  = [p[1] for p in pts]
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
-            w = max_x - min_x
+            w = max_x - min_x   # drawing units
             h = max_y - min_y
 
-            n_x  = max(1, round(w / GRID_SPACE))
-            n_y  = max(1, round(h / GRID_SPACE))
+            # Alan m² — drawing units → mm → m²
+            area_mm2 = (w * _mm_per) * (h * _mm_per)
+            area_m2  = area_mm2 / 1_000_000
+
+            # Lüx hesabı: N = ceil(E × A / (Φ × MLF × UF))
+            E   = lux_var.get()
+            MLF = mlf_var.get()
+            UF  = uf_var.get()
+            phi = _lum_lumens(lum_name)
+            N   = max(1, _math.ceil((E * area_m2) / (phi * MLF * UF)))
+
+            # Grid düzeni: oda en/boy oranına uygun
+            aspect = (w / h) if h > 0 else 1.0
+            n_y = max(1, round(_math.sqrt(N / aspect)))
+            n_x = max(1, _math.ceil(N / n_y))
+
             sp_x = w / n_x
             sp_y = h / n_y
             half = BLOCK_SIZE / 2
+
+            # Bilgi etiketi güncelle
+            lux_info.config(text=f"N={N}  ({n_x}×{n_y} grid)  Φ={phi} lm  A={area_m2:.1f}m²")
 
             ARM_LAYER = "ARMATÜR"
             try:
@@ -1677,6 +1727,34 @@ def open_luminaire_picker(
                        bg=BG, fg=ACCENT, font=("Segoe UI", 12, "bold"), pady=8)
         hdr.pack(fill="x")
         tk.Frame(root, bg=ACCENT, height=1).pack(fill="x")
+
+        # ── Lüx kontrol paneli ────────────────────────────────────────────
+        lux_frame = tk.Frame(root, bg="#0a1520", pady=4)
+        lux_frame.pack(fill="x", padx=10)
+        tk.Label(lux_frame, text="Hedef Lüx:", bg="#0a1520", fg=FG2,
+                 font=FONT_S).pack(side="left")
+        lux_var = tk.IntVar(value=300)
+        lux_spin = tk.Spinbox(lux_frame, from_=50, to=2000, increment=50,
+                              textvariable=lux_var, width=6,
+                              bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+                              relief="flat", bd=1)
+        lux_spin.pack(side="left", padx=(4,12))
+        tk.Label(lux_frame, text="lx  |  MLF:", bg="#0a1520", fg=FG2,
+                 font=FONT_S).pack(side="left")
+        mlf_var = tk.DoubleVar(value=0.80)
+        tk.Spinbox(lux_frame, from_=0.5, to=1.0, increment=0.05,
+                   textvariable=mlf_var, format="%.2f", width=5,
+                   bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+                   relief="flat", bd=1).pack(side="left", padx=(4,12))
+        tk.Label(lux_frame, text="UF:", bg="#0a1520", fg=FG2,
+                 font=FONT_S).pack(side="left")
+        uf_var = tk.DoubleVar(value=0.65)
+        tk.Spinbox(lux_frame, from_=0.3, to=1.0, increment=0.05,
+                   textvariable=uf_var, format="%.2f", width=5,
+                   bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+                   relief="flat", bd=1).pack(side="left", padx=(4,12))
+        lux_info = tk.Label(lux_frame, text="", bg="#0a1520", fg="#ffcc44", font=FONT_S)
+        lux_info.pack(side="left", padx=8)
 
         # ── Ana içerik ───────────────────────────────────────────────────
         content = tk.Frame(root, bg=BG)
@@ -1771,7 +1849,10 @@ def open_luminaire_picker(
             name = room.get("name") or "İSİMSİZ"
             num  = room.get("number") or ""
             prefix = f"{num} · " if num else ""
-            _set_status(f"Seçili: {prefix}{name}  — Armatür tıklayın")
+            # Oda tipine göre önerilen lüx değerini lux_var'a yaz
+            suggested = _room_lux(name)
+            lux_var.set(suggested)
+            _set_status(f"Seçili: {prefix}{name}  — Önerilen lüx: {suggested}  — Armatür seçin")
 
         selected_lum = [None]   # seçili armatür — butona tıkta kaybolmasın
 
