@@ -1773,26 +1773,28 @@ def open_luminaire_picker(
             prefix = f"{num} · " if num else ""
             _set_status(f"Seçili: {prefix}{name}  — Armatür tıklayın")
 
+        selected_lum = [None]   # seçili armatür — butona tıkta kaybolmasın
+
         def _on_lum_select(event=None):
-            sel_r = room_lb.curselection()
             sel_l = lum_lb.curselection()
-            if not sel_r or not sel_l:
+            if not sel_l:
                 return
-            room = rooms[sel_r[0]]
-            lum  = lum_list[sel_l[0]]
-            r_name = room.get("name") or f"Mekan {room['id']}"
-            r_num  = room.get("number") or ""
-            prefix = f"{r_num} · " if r_num else ""
-            _set_status(f"Seçili: {prefix}{r_name}  →  {lum}  — Çiz'e bas")
+            selected_lum[0] = lum_list[sel_l[0]]
+            room = selected_room[0]
+            if room:
+                r_name = room.get("name") or f"Mekan {room['id']}"
+                r_num  = room.get("number") or ""
+                prefix = f"{r_num} · " if r_num else ""
+                _set_status(f"Seçili: {prefix}{r_name}  →  {selected_lum[0]}  — Çiz'e bas")
+            else:
+                _set_status(f"Armatür: {selected_lum[0]}  — Mekan seçin")
 
         def _on_draw():
-            sel_r = room_lb.curselection()
-            sel_l = lum_lb.curselection()
-            if not sel_r or not sel_l:
+            room = selected_room[0]
+            lum  = selected_lum[0]
+            if not room or not lum:
                 _set_status("Önce mekan ve armatür seçin!")
                 return
-            room   = rooms[sel_r[0]]
-            lum    = lum_list[sel_l[0]]
             rid    = room["id"]
             r_name = room.get("name") or f"Mekan {rid}"
             r_num  = room.get("number") or ""
@@ -1801,7 +1803,12 @@ def open_luminaire_picker(
             prefix = f"{r_num} · " if r_num else ""
             count, err = _place_luminaires(room, lum)
             _set_status(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
-            room_lb.itemconfig(sel_r[0], fg="#00ff88")
+            # Listede yeşil vurgula
+            try:
+                idx = rooms.index(room)
+                room_lb.itemconfig(idx, fg="#00ff88")
+            except ValueError:
+                pass
 
         def _on_close():
             _erase_border(hover_ent[0])
