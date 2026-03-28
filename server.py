@@ -1929,7 +1929,14 @@ def open_luminaire_picker(
             # Eski border sil, yeni çiz + zoom
             _erase_border(hover_ent[0])
             hover_ent[0] = _draw_border(room["points"])
-            _zoom_to(room)
+            # Zoom'u ayrı thread'de çalıştır — tkinter UI'ı bloklamasın
+            def _zoom_thread(r=room):
+                pythoncom.CoInitialize()
+                try:
+                    _zoom_to(r)
+                finally:
+                    pythoncom.CoUninitialize()
+            threading.Thread(target=_zoom_thread, daemon=True).start()
 
             # Mevcut atamayı göster
             rid      = room["id"]
