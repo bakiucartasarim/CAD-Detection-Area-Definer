@@ -1478,6 +1478,19 @@ def open_luminaire_picker(
     data  = _json.loads(match_rooms_to_polygons(dxf_path))
     rooms = [r for r in data["rooms"] if r["points"]]  # polygon'u olanlar
 
+    # Çizim birimini oku → 600mm armatür boyutunu drawing unit'e çevir
+    try:
+        import ezdxf as _ezdxf
+        _dxf_doc = _ezdxf.readfile(dxf_path, encoding='utf-8')
+        _insunits = _dxf_doc.header.get('$INSUNITS', 0)
+    except Exception:
+        _insunits = 0
+    # INSUNITS: 4=mm, 5=cm, 6=m, 1=inch, 0=birim yok (mm varsay)
+    _MM_PER_UNIT = {4: 1.0, 5: 10.0, 6: 1000.0, 1: 25.4, 2: 304.8, 3: 1609344.0}
+    _mm_per = _MM_PER_UNIT.get(_insunits, 1.0)   # 1 drawing unit = kaç mm
+    BLOCK_SIZE  = 600.0 / _mm_per    # 600mm → drawing units (mm'de 600, cm'de 60, m'de 0.6)
+    GRID_SPACE  = 1500.0 / _mm_per   # 1500mm grid aralığı → drawing units
+
     def _run():
         import tkinter as tk
         import tkinter.ttk as ttk
@@ -1561,8 +1574,8 @@ def open_luminaire_picker(
                     pass
             placed_ents[room_id] = []
 
-        def _place_luminaires(room, lum_name, block_mm=600):
-            """Odaya 600×600mm kare grid yerleşimi çiz."""
+        def _place_luminaires(room, lum_name):
+            """Odaya 60×60cm (600mm) kare grid yerleşimi çiz — birim otomatik."""
             if not doc:
                 return 0, "GstarCAD bağlantısı yok"
             room_id = room["id"]
@@ -1576,11 +1589,11 @@ def open_luminaire_picker(
             w = max_x - min_x
             h = max_y - min_y
 
-            n_x  = max(1, round(w / 1500))
-            n_y  = max(1, round(h / 1500))
+            n_x  = max(1, round(w / GRID_SPACE))
+            n_y  = max(1, round(h / GRID_SPACE))
             sp_x = w / n_x
             sp_y = h / n_y
-            half = block_mm / 2
+            half = BLOCK_SIZE / 2
 
             ARM_LAYER = "ARMATÜR"
             try:
@@ -1641,7 +1654,8 @@ def open_luminaire_picker(
 
         # ── Tkinter penceresi ─────────────────────────────────────────────
         root = tk.Tk()
-        root.title("Mekan Armatür Atama")
+        _unit_label = {4:"mm", 5:"cm", 6:"m", 1:"inç", 0:"mm(?)"}.get(_insunits, str(_insunits))
+        root.title(f"Mekan Armatür Atama  [birim: {_unit_label} · armatür: {BLOCK_SIZE:.0f}×{BLOCK_SIZE:.0f} {_unit_label}]")
         root.configure(bg="#0d1b2a")
         root.geometry("680x520")
         root.resizable(True, True)
