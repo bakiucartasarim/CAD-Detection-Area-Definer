@@ -1574,34 +1574,20 @@ def open_luminaire_picker(
                     pass
 
         def _zoom_to(room):
-            if not acad:
+            if not doc:
                 return
             try:
-                pts  = room["points"]
-                xs   = [p[0] for p in pts]
-                ys   = [p[1] for p in pts]
-                w    = max(xs) - min(xs)
-                h    = max(ys) - min(ys)
-                pad  = max(w, h) * 0.20   # %20 kenar boşluğu
-                x1, y1 = min(xs) - pad, min(ys) - pad
-                x2, y2 = max(xs) + pad, max(ys) + pad
-                p1 = win32com.client.VARIANT(
-                    pythoncom.VT_ARRAY | pythoncom.VT_R8, [x1, y1, 0.0])
-                p2 = win32com.client.VARIANT(
-                    pythoncom.VT_ARRAY | pythoncom.VT_R8, [x2, y2, 0.0])
-                acad.ZoomWindow(p1, p2)
+                pts = room["points"]
+                xs  = [p[0] for p in pts]
+                ys  = [p[1] for p in pts]
+                w   = max(xs) - min(xs)
+                h   = max(ys) - min(ys)
+                pad = max(w, h) * 0.20
+                doc.SendCommand(
+                    f"ZOOM W {min(xs)-pad:.2f},{min(ys)-pad:.2f} "
+                    f"{max(xs)+pad:.2f},{max(ys)+pad:.2f}\n")
             except Exception:
-                try:
-                    # Fallback: SendCommand
-                    pts = room["points"]
-                    xs  = [p[0] for p in pts]
-                    ys  = [p[1] for p in pts]
-                    pad = max(max(xs)-min(xs), max(ys)-min(ys)) * 0.20
-                    doc.SendCommand(
-                        f"ZOOM W {min(xs)-pad:.2f},{min(ys)-pad:.2f} "
-                        f"{max(xs)+pad:.2f},{max(ys)+pad:.2f}\n")
-                except Exception:
-                    pass
+                pass
 
         # Oda → çizilen armatür entity listesi  {room_id: [ent, ent, ...]}
         placed_ents = {}
@@ -1929,14 +1915,7 @@ def open_luminaire_picker(
             # Eski border sil, yeni çiz + zoom
             _erase_border(hover_ent[0])
             hover_ent[0] = _draw_border(room["points"])
-            # Zoom'u ayrı thread'de çalıştır — tkinter UI'ı bloklamasın
-            def _zoom_thread(r=room):
-                pythoncom.CoInitialize()
-                try:
-                    _zoom_to(r)
-                finally:
-                    pythoncom.CoUninitialize()
-            threading.Thread(target=_zoom_thread, daemon=True).start()
+            _zoom_to(room)
 
             # Mevcut atamayı göster
             rid      = room["id"]
