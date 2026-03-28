@@ -1680,12 +1680,22 @@ def open_luminaire_picker(
                 except Exception:
                     pass
 
+            # Progress bar göster
+            total_cells = n_x * n_y
+            pb.config(maximum=total_cells, value=0)
+            pb.pack(fill="x", padx=10, pady=(0, 4))
+            root.update_idletasks()
+
             placed = []
             errors = []
+            done   = 0
             for i in range(n_x):
                 for j in range(n_y):
                     cx = min_x + sp_x * (i + 0.5)
                     cy = min_y + sp_y * (j + 0.5)
+                    done += 1
+                    pb.config(value=done)
+                    root.update_idletasks()
                     if not _in_poly_local(cx, cy, pts):
                         continue
                     try:
@@ -1703,6 +1713,8 @@ def open_luminaire_picker(
                         placed.append(sq)
                     except Exception as e:
                         errors.append(str(e))
+
+            pb.pack_forget()   # bitince gizle
 
             # Armatür adı etiketi
             try:
@@ -1870,10 +1882,21 @@ def open_luminaire_picker(
             lum_lb.insert("end", f"  {lum}")
         lum_lb.pack(fill="both", expand=True)
 
-        # ── Durum satırı ─────────────────────────────────────────────────
+        # ── Durum satırı + Progress bar ──────────────────────────────────
         tk.Frame(root, bg=ACCENT, height=1).pack(fill="x")
         status_lbl = tk.Label(root, text="Mekan seçin, ardından armatür tıklayın.",
                               bg=BG, fg=FG2, font=FONT_S, pady=4)
+        status_lbl.pack(fill="x", padx=10)
+
+        pb_style = ttk.Style()
+        pb_style.theme_use("default")
+        pb_style.configure("Lum.Horizontal.TProgressbar",
+                           troughcolor="#0a1520", background="#00cfff",
+                           thickness=6)
+        pb = ttk.Progressbar(root, style="Lum.Horizontal.TProgressbar",
+                             orient="horizontal", mode="determinate")
+        pb.pack(fill="x", padx=10, pady=(0, 4))
+        pb.pack_forget()   # başta gizli
 
         def _set_status(msg):
             status_lbl.config(text=msg)
