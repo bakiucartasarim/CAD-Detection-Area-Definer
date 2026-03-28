@@ -1622,9 +1622,12 @@ def open_luminaire_picker(
             w = max_x - min_x   # drawing units
             h = max_y - min_y
 
-            # Alan m² — drawing units → mm → m²
-            area_mm2 = (w * _mm_per) * (h * _mm_per)
-            area_m2  = area_mm2 / 1_000_000
+            # Etkin birim: kullanıcı seçimi (cm, mm, m) × ölçek çarpanı
+            eff_mm = _get_mm_per()            # 1 drawing unit = kaç mm gerçek
+            blk    = 600.0 / eff_mm           # 600mm armatür → drawing units
+
+            # Alan m² — drawing units × eff_mm → mm → m²
+            area_m2 = (w * eff_mm / 1000.0) * (h * eff_mm / 1000.0)
 
             # Lüx hesabı: N = ceil(E × A / (Φ × MLF × UF))
             E   = lux_var.get()
@@ -1640,7 +1643,7 @@ def open_luminaire_picker(
 
             sp_x = w / n_x
             sp_y = h / n_y
-            half = BLOCK_SIZE / 2
+            half = blk / 2
 
             # Bilgi etiketi güncelle
             lux_info.config(text=f"N={N}  ({n_x}×{n_y} grid)  Φ={phi} lm  A={area_m2:.1f}m²")
@@ -1755,6 +1758,54 @@ def open_luminaire_picker(
                    relief="flat", bd=1).pack(side="left", padx=(4,12))
         lux_info = tk.Label(lux_frame, text="", bg="#0a1520", fg="#ffcc44", font=FONT_S)
         lux_info.pack(side="left", padx=8)
+
+        # ── Birim + Ölçek paneli ──────────────────────────────────────────
+        scale_frame = tk.Frame(root, bg="#070f18", pady=3)
+        scale_frame.pack(fill="x", padx=10)
+
+        _UNIT_MM   = {"mm": 1.0, "cm": 10.0, "m": 1000.0}
+        _SCALE_DEN = {"1:1": 1, "1:20": 20, "1:50": 50,
+                      "1:100": 100, "1:200": 200, "1:500": 500}
+
+        # INSUNITS'ten default birim
+        _auto_unit = {4: "mm", 5: "cm", 6: "m"}.get(_insunits, "mm")
+
+        tk.Label(scale_frame, text="Birim:", bg="#070f18", fg=FG2,
+                 font=FONT_S).pack(side="left")
+        unit_var = tk.StringVar(value="cm")   # kullanıcı cm istedi
+        tk.OptionMenu(scale_frame, unit_var,
+                      *_UNIT_MM.keys()).configure(
+            bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+            activebackground="#0d3a4a", relief="flat", bd=0,
+            highlightthickness=0)
+        unit_menu = tk.OptionMenu(scale_frame, unit_var, *_UNIT_MM.keys())
+        unit_menu.config(bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+                        relief="flat", bd=0, highlightthickness=0)
+        unit_menu.pack(side="left", padx=(2,12))
+
+        tk.Label(scale_frame, text="Ölçek:", bg="#070f18", fg=FG2,
+                 font=FONT_S).pack(side="left")
+        scale_var2 = tk.StringVar(value="1:1")
+        scale_menu = tk.OptionMenu(scale_frame, scale_var2, *_SCALE_DEN.keys())
+        scale_menu.config(bg="#1a2a3a", fg=ACCENT, font=FONT_S,
+                         relief="flat", bd=0, highlightthickness=0)
+        scale_menu.pack(side="left", padx=(2,12))
+
+        eff_lbl = tk.Label(scale_frame, text="", bg="#070f18", fg="#aaffaa", font=FONT_S)
+        eff_lbl.pack(side="left", padx=4)
+
+        def _update_eff_label(*_):
+            u  = _UNIT_MM.get(unit_var.get(), 1.0)
+            s  = _SCALE_DEN.get(scale_var2.get(), 1)
+            mm = u * s
+            blk = 600.0 / mm
+            eff_lbl.config(text=f"1 birim={mm:.0f}mm  |  armatür={blk:.1f} çizim birimi")
+        unit_var.trace_add("write", _update_eff_label)
+        scale_var2.trace_add("write", _update_eff_label)
+        _update_eff_label()
+
+        def _get_mm_per():
+            return _UNIT_MM.get(unit_var.get(), 1.0) * _SCALE_DEN.get(scale_var2.get(), 1)
 
         # ── Ana içerik ───────────────────────────────────────────────────
         content = tk.Frame(root, bg=BG)
