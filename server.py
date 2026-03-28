@@ -1824,8 +1824,21 @@ def open_luminaire_picker(
         root.mainloop()
         pythoncom.CoUninitialize()
 
-    t = threading.Thread(target=_run, daemon=True)
+    _err_box = [None]
+
+    def _run_safe():
+        try:
+            _run()
+        except Exception as _e:
+            import traceback
+            _err_box[0] = traceback.format_exc()
+
+    t = threading.Thread(target=_run_safe, daemon=True)
     t.start()
+    t.join(timeout=3.0)   # 3 sn bekle — hata varsa yakala
+
+    if _err_box[0]:
+        return _json.dumps({"hata": _err_box[0]}, ensure_ascii=False)
 
     return _json.dumps({
         "durum":   "pencere açıldı",
