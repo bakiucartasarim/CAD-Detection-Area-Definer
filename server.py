@@ -1726,9 +1726,11 @@ def open_luminaire_picker(
 
         # ── Durum satırı ─────────────────────────────────────────────────
         tk.Frame(root, bg=ACCENT, height=1).pack(fill="x")
-        status_var = tk.StringVar(value="Mekan seçin, ardından armatür tıklayın.")
-        status_lbl = tk.Label(root, textvariable=status_var, bg=BG, fg=FG2,
-                              font=FONT_S, pady=4)
+        status_lbl = tk.Label(root, text="Mekan seçin, ardından armatür tıklayın.",
+                              bg=BG, fg=FG2, font=FONT_S, pady=4)
+
+        def _set_status(msg):
+            status_lbl.config(text=msg)
         status_lbl.pack(fill="x", padx=10)
 
         # ── Alt butonlar ─────────────────────────────────────────────────
@@ -1779,7 +1781,7 @@ def open_luminaire_picker(
             name = room.get("name") or "İSİMSİZ"
             num  = room.get("number") or ""
             prefix = f"{num} · " if num else ""
-            status_var.set(f"Seçili: {prefix}{name}  — Armatür tıklayın")
+            _set_status(f"Seçili: {prefix}{name}  — Armatür tıklayın")
 
         def _on_lum_select(event=None):
             sel_r = room_lb.curselection()
@@ -1791,13 +1793,13 @@ def open_luminaire_picker(
             r_name = room.get("name") or f"Mekan {room['id']}"
             r_num  = room.get("number") or ""
             prefix = f"{r_num} · " if r_num else ""
-            status_var.set(f"Seçili: {prefix}{r_name}  →  {lum}  — Çiz'e bas")
+            _set_status(f"Seçili: {prefix}{r_name}  →  {lum}  — Çiz'e bas")
 
         def _on_draw():
             sel_r = room_lb.curselection()
             sel_l = lum_lb.curselection()
             if not sel_r or not sel_l:
-                status_var.set("Önce mekan ve armatür seçin!")
+                _set_status("Önce mekan ve armatür seçin!")
                 return
             room   = rooms[sel_r[0]]
             lum    = lum_list[sel_l[0]]
@@ -1808,7 +1810,7 @@ def open_luminaire_picker(
             assigned_lbl.config(text=f"Atanan: {len(assignments)}")
             prefix = f"{r_num} · " if r_num else ""
             count, err = _place_luminaires(room, lum)
-            status_var.set(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
+            _set_status(f"✓  {prefix}{r_name}  →  {lum}  ({count} adet){err}")
             room_lb.itemconfig(sel_r[0], fg="#00ff88")
 
         room_lb.bind("<<ListboxSelect>>", _on_room_select)
